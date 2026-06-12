@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     # Regex opcional de origenes permitidos (override manual). Si se setea, manda.
     cors_origin_regex: str | None = None
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _clean_database_url(cls, v: object) -> object:
+        # Quita espacios/saltos de linea internos (una URL de DB valida no los
+        # tiene sin encodear). Robustez ante copy-paste con wrap, ej. el clasico
+        # "sslmode=requi re" que rompe psycopg.
+        if isinstance(v, str):
+            return "".join(v.split())
+        return v
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _parse_cors_origins(cls, v: object) -> object:
