@@ -1,0 +1,30 @@
+# Blueprint de Render (https://render.com): crea el servicio web del backend a
+# partir del Dockerfile. La base de datos NO va aca: se usa Neon (Postgres
+# administrado) y su connection string se carga en DATABASE_URL.
+#
+# Las vars con `sync: false` se cargan A MANO en el dashboard de Render (son
+# secretos / dependen de otros servicios). SESSION_SECRET lo genera Render.
+services:
+  - type: web
+    name: backend-corpo3d
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: COOKIE_SAMESITE
+        # Vercel (front) y Render (api) son dominios distintos = cross-site:
+        # con "none" la cookie de sesion viaja (y fuerza Secure).
+        value: none
+      - key: SESSION_DAYS
+        value: "7"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        # Neon: postgresql+psycopg://USER:PASS@HOST.neon.tech/DB?sslmode=require
+        sync: false
+      - key: CORS_ORIGINS
+        # JSON array con el origen exacto del front: ["https://<app>.vercel.app"]
+        sync: false

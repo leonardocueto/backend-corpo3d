@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dashboard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dashboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    # Postgres en su primer arranque levanta un server temporal para init y luego se
+    # reinicia; el healthcheck puede dar "healthy" en ese hueco y 'alembic upgrade' choca
+    # con "the database system is starting up". Con on-failure, Compose reintenta y el
+    # segundo intento (DB ya lista) arranca bien, en vez de quedar Exited(1) para siempre.
+    restart: on-failure
+    env_file: .env
+    environment:
+      # Dentro de la red de compose el host de la DB es el nombre del servicio: "db".
+      # Esto pisa el DATABASE_URL del .env (que apunta a localhost para dev sin docker).
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/dashboard
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Aplica migraciones y luego levanta la API.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  pgdata:
