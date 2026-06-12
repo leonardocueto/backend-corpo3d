@@ -1,10 +1,18 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
+from app.ratelimit import limiter
 from app.routers import auth
 
 app = FastAPI(title="Dashboard API")
+
+# Rate limiting (slowapi): registra el limiter y el handler de 429. Los limites
+# por endpoint se declaran con @limiter.limit(...) en los routers.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS para cookies: NO se puede usar "*" junto con allow_credentials=True.
 app.add_middleware(

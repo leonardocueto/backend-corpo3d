@@ -8,6 +8,7 @@ from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_admin
 from app.models import Session, User
+from app.ratelimit import limiter
 from app.schemas import LoginIn, RegisterIn, UserOut
 from app.security import (
     generate_session_token,
@@ -33,7 +34,8 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 @router.post("/login", response_model=UserOut)
-def login(payload: LoginIn, response: Response, db: DbSession = Depends(get_db)):
+@limiter.limit("5/minute")
+def login(request: Request, payload: LoginIn, response: Response, db: DbSession = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == payload.email))
     # Verificar siempre el password (aunque el user no exista) para no filtrar
     # por timing si un email está registrado.
@@ -88,7 +90,8 @@ def logout(request: Request, response: Response, db: DbSession = Depends(get_db)
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_admin)],  # solo un admin autenticado puede crear usuarios
 )
-def register(payload: RegisterIn, db: DbSession = Depends(get_db)):
+@limiter.limit("10/minute")
+def register(request: Request, payload: RegisterIn, db: DbSession = Depends(get_db)):
     if db.scalar(select(User).where(User.email == payload.email)):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Email ya registrado")
     user = User(

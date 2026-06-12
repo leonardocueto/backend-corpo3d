@@ -119,4 +119,7 @@ El front debe llamar a la API con `credentials: "include"` para enviar/recibir l
 - Conectar el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`,
   capa de servicio con `credentials: "include"` y el fetching nativo de Nuxt 4).
 - Limpieza de sesiones vencidas (job periódico o `DELETE` en login).
-- Rate limiting en `/auth/login` si se expone a internet.
+- Rate limiting (hecho): `slowapi` por IP en `/auth/login` (5/min) y `/auth/register`
+  (10/min); limiter en `app/ratelimit.py`. Requiere uvicorn con `--proxy-headers`
+  (ya en `start.sh`) para tomar la IP real detrás del proxy. En memoria (1 instancia);
+  para multi-instancia haría falta Redis.
