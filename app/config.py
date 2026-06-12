@@ -1,6 +1,9 @@
+import json
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -16,10 +19,24 @@ class Settings(BaseSettings):
     cookie_domain: str | None = None
     session_days: int = 7
 
-    # CORS (JSON array en el .env)
-    cors_origins: list[str] = ["http://localhost:3000"]
+    # CORS. Acepta JSON (["https://a","https://b"]) o lista separada por comas
+    # (https://a,https://b). NoDecode desactiva el parseo JSON automatico de
+    # pydantic-settings para que el validator de abajo maneje ambos formatos.
+    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
     # Regex opcional de origenes permitidos (override manual). Si se setea, manda.
     cors_origin_regex: str | None = None
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v: object) -> object:
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if s.startswith("["):
+                return json.loads(s)  # formato JSON array
+            return [o.strip() for o in s.split(",") if o.strip()]  # separado por comas
+        return v
 
     @property
     def cookie_secure(self) -> bool:
