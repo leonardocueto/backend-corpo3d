@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     cookie_domain: str | None = None
     session_days: int = 7
 
+    # Recuperacion de contraseña (forgot/reset)
+    frontend_url: str = "http://localhost:3000"  # base del link del email
+    reset_token_minutes: int = 10                # vida del token de reset
+    resend_api_key: str | None = None            # si falta, en dev se loguea el link
+    email_from: str = "CorpoLab 3D <onboarding@resend.dev>"
+
     # CORS. Acepta JSON (["https://a","https://b"]) o lista separada por comas
     # (https://a,https://b). NoDecode desactiva el parseo JSON automatico de
     # pydantic-settings para que el validator de abajo maneje ambos formatos.

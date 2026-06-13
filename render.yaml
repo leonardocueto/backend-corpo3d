@@ -28,3 +28,15 @@ services:
       - key: CORS_ORIGINS
         # JSON array con el origen exacto del front: ["https://<app>.vercel.app"]
         sync: false
+      - key: RESET_TOKEN_MINUTES
+        value: "10"
+      - key: FRONTEND_URL
+        # URL del front en Vercel (base del link del email): https://<app>.vercel.app
+        sync: false
+      - key: EMAIL_FROM
+        # Remitente. Prueba: "CorpoLab 3D <onboarding@resend.dev>" (solo envia al
+        # mail de tu cuenta Resend). Real: no-reply@<dominio verificado>.
+        sync: false
+      - key: RESEND_API_KEY
+        # Secreto de Resend (re_...). Se carga a mano en el dashboard de Render.
+        sync: false
