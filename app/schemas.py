@@ -50,6 +50,19 @@ class PasswordUpdate(BaseModel):
     password: str = Field(min_length=8)
 
 
+class ForgotPasswordIn(BaseModel):
+    """Pedido de link de recuperacion (publico, sin sesion)."""
+
+    email: EmailStr
+
+
+class ResetPasswordIn(BaseModel):
+    """Reseteo con el token recibido por email."""
+
+    token: str
+    password: str = Field(min_length=8)
+
+
 class UsersPage(BaseModel):
     """Pagina de resultados para el listado de usuarios."""
 
