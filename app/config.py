@@ -43,10 +43,14 @@ class Settings(BaseSettings):
             s = v.strip()
             if not s:
                 return []
-            if s.startswith("["):
-                return json.loads(s)  # formato JSON array
-            return [o.strip() for o in s.split(",") if o.strip()]  # separado por comas
-        return v
+            items = json.loads(s) if s.startswith("[") else s.split(",")  # JSON o comas
+        elif isinstance(v, (list, tuple)):
+            items = list(v)
+        else:
+            return v
+        # Normaliza cada origen: sin espacios y SIN barra final (el header Origin
+        # del navegador es scheme://host[:port], sin "/" ni path).
+        return [str(o).strip().rstrip("/") for o in items if str(o).strip()]
 
     @property
     def cookie_secure(self) -> bool:
