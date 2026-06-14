@@ -33,12 +33,32 @@ def tier_is_unlimited(tier: "UserTier | None", now: datetime) -> bool:
     )
 
 
+def downgrade_if_expired(tier: "UserTier | None", now: datetime) -> bool:
+    """Si el tier es pago y vencio, lo pasa FISICAMENTE a 'free' (mantiene
+    paid_at/expires_at como historial del ultimo pago). Devuelve True si cambio
+    algo (para que el caller commitee). Idempotente: ya en 'free' no toca nada."""
+    if tier is not None and tier.tier in PAID_TIERS and not tier_is_unlimited(tier, now):
+        tier.tier = "free"
+        return True
+    return False
+
+
+def sync_user_tier(db: DbSession, user: User, now: datetime) -> "UserTier | None":
+    """Reconcilia el tier del usuario: si su tier pago vencio, lo degrada a 'free'
+    y persiste. Reusable (login + user_is_unlimited). No-op si no hay fila."""
+    tier = db.scalar(select(UserTier).where(UserTier.user_id == user.id))
+    if downgrade_if_expired(tier, now):
+        db.commit()
+    return tier
+
+
 def user_is_unlimited(db: DbSession, user: User, now: datetime) -> bool:
     """True si el usuario no tiene limite de exportaciones: admin, o tier pago
-    vigente. Fuente unica de verdad del concepto 'ilimitado'."""
+    vigente. Fuente unica de verdad del concepto 'ilimitado'. De paso sincroniza
+    (degrada) un tier vencido."""
     if user.is_admin:
         return True
-    tier = db.scalar(select(UserTier).where(UserTier.user_id == user.id))
+    tier = sync_user_tier(db, user, now)
     return tier_is_unlimited(tier, now)
 
 

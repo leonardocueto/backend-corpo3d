@@ -15,7 +15,7 @@ from app.database import get_db
 from app.deps import require_admin
 from app.models import ExportWindow, User, UserTier
 from app.routers.exports import remaining_for
-from app.routers.tiers import PAID_TIERS, expiry_for, tier_is_unlimited
+from app.routers.tiers import PAID_TIERS, downgrade_if_expired, expiry_for, tier_is_unlimited
 from app.schemas import (
     AdminUserOut,
     PasswordUpdate,
@@ -63,14 +63,19 @@ def list_users(
     win_by_user = {w.user_id: w for w in windows}
     tier_by_user = {t.user_id: t for t in tiers}
 
+    # Sincroniza (degrada a free) los tiers vencidos de la pagina; un solo commit.
+    # Lista (no generador) para evaluar TODOS, no cortar en el primer vencido.
+    if any([downgrade_if_expired(t, now) for t in tiers]):
+        db.commit()
+
     def to_item(u: User) -> AdminUserOut:
         base = UserOut.model_validate(u).model_dump()
         tier_obj = tier_by_user.get(u.id)
-        tier_name = tier_obj.tier if tier_obj else "free"
         unlimited = u.is_admin or tier_is_unlimited(tier_obj, now)
         return AdminUserOut(
             **base,
-            tier=tier_name,
+            # tier crudo = unica fuente de verdad (ya es 'free' si vencio).
+            tier=tier_obj.tier if tier_obj else "free",
             tier_paid_at=tier_obj.paid_at if tier_obj else None,
             tier_expires_at=tier_obj.expires_at if tier_obj else None,
             export_remaining=None if unlimited else remaining_for(win_by_user.get(u.id), now),
