@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
 from app.deps import require_admin
-from app.models import ExportWindow, User
+from app.models import ExportWindow, User, UserTier
 from app.routers.exports import remaining_for
+from app.routers.tiers import PAID_TIERS, expiry_for, tier_is_unlimited
 from app.schemas import (
     AdminUserOut,
     PasswordUpdate,
@@ -48,7 +49,7 @@ def list_users(
         .limit(page_size)
     ).all()
 
-    # Ventanas de los usuarios de esta pagina en una sola query (evita N+1).
+    # Ventanas y tiers de los usuarios de esta pagina en una query c/u (evita N+1).
     now = datetime.now(timezone.utc)
     ids = [u.id for u in rows]
     windows = (
@@ -56,16 +57,24 @@ def list_users(
         if ids
         else []
     )
-    by_user = {w.user_id: w for w in windows}
+    tiers = (
+        db.scalars(select(UserTier).where(UserTier.user_id.in_(ids))).all() if ids else []
+    )
+    win_by_user = {w.user_id: w for w in windows}
+    tier_by_user = {t.user_id: t for t in tiers}
 
     def to_item(u: User) -> AdminUserOut:
         base = UserOut.model_validate(u).model_dump()
-        if u.is_admin:
-            return AdminUserOut(**base, export_remaining=None, export_unlimited=True)
+        tier_obj = tier_by_user.get(u.id)
+        tier_name = tier_obj.tier if tier_obj else "free"
+        unlimited = u.is_admin or tier_is_unlimited(tier_obj, now)
         return AdminUserOut(
             **base,
-            export_remaining=remaining_for(by_user.get(u.id), now),
-            export_unlimited=False,
+            tier=tier_name,
+            tier_paid_at=tier_obj.paid_at if tier_obj else None,
+            tier_expires_at=tier_obj.expires_at if tier_obj else None,
+            export_remaining=None if unlimited else remaining_for(win_by_user.get(u.id), now),
+            export_unlimited=unlimited,
         )
 
     return UsersPage(
@@ -88,6 +97,22 @@ def create_user(payload: UserCreate, db: DbSession = Depends(get_db)):
         is_admin=payload.is_admin,
     )
     db.add(user)
+    db.flush()  # asigna user.id para el tier
+
+    # Tier inicial: solo si es pago y NO admin (free queda lazy = 3 intentos;
+    # admin es ilimitado por rol). Los intentos no se cargan a mano: free=3 por
+    # defecto, pagos = ilimitado por el tier.
+    if not user.is_admin and payload.tier in PAID_TIERS:
+        now = datetime.now(timezone.utc)
+        db.add(
+            UserTier(
+                user_id=user.id,
+                tier=payload.tier,
+                paid_at=now,
+                expires_at=expiry_for(payload.tier, now),
+            )
+        )
+
     db.commit()
     db.refresh(user)
     return user

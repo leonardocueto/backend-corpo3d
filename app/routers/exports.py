@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session as DbSession
 from app.database import get_db
 from app.deps import get_current_user, require_admin
 from app.models import ExportWindow, User
+from app.routers.tiers import user_is_unlimited
 from app.schemas import ExportAttemptsOut, SetAttemptsIn
 
 # Limite de exportaciones (Free Tier). Ventana ROLLING de 24h anclada al primer
@@ -63,10 +64,10 @@ def get_attempts(
 ) -> ExportAttemptsOut:
     """Intentos restantes del usuario para la ventana actual. Solo lectura: no
     crea ni resetea la fila (una ventana expirada se reporta como fresca)."""
-    if user.is_admin:
+    now = datetime.now(timezone.utc)
+    if user_is_unlimited(db, user, now):
         return _admin_response()
 
-    now = datetime.now(timezone.utc)
     win = db.scalar(select(ExportWindow).where(ExportWindow.user_id == user.id))
     active = win is not None and now < win.window_start + WINDOW
     return ExportAttemptsOut(
@@ -81,12 +82,12 @@ def get_attempts(
 def use_attempt(
     user: User = Depends(get_current_user), db: DbSession = Depends(get_db)
 ) -> ExportAttemptsOut:
-    """Valida y consume un intento. Admin: ilimitado (no toca la tabla). Free:
-    descuenta 1 si quedan; si no, 403. Fuente de verdad del contador."""
-    if user.is_admin:
+    """Valida y consume un intento. Ilimitado (admin o tier pago vigente): no
+    toca la tabla. Free: descuenta 1 si quedan; si no, 403. Fuente de verdad."""
+    now = datetime.now(timezone.utc)
+    if user_is_unlimited(db, user, now):
         return _admin_response()
 
-    now = datetime.now(timezone.utc)
     win = _get_or_create_locked(db, user.id, now)
 
     # Ventana expirada -> arranca una nueva con el limite completo.
@@ -120,18 +121,19 @@ def set_user_attempts(
     user_id: uuid.UUID, payload: SetAttemptsIn, db: DbSession = Depends(get_db)
 ) -> ExportAttemptsOut:
     """Carga manual de intentos a un usuario (admin). FIJA el contador a
-    `amount` y reinicia la ventana de 24h. Solo para usuarios NO admin: a un
-    admin no tiene sentido (es ilimitado) y abriria bugs en el contador."""
+    `amount` y reinicia la ventana de 24h. Solo para usuarios con limite: a uno
+    ilimitado (admin o tier pago vigente) no tiene sentido y abriria bugs."""
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
-    if target.is_admin:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail="No se pueden cargar intentos a un admin (es ilimitado)",
-        )
 
     now = datetime.now(timezone.utc)
+    if user_is_unlimited(db, target, now):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="No se pueden cargar intentos a un usuario ilimitado",
+        )
+
     win = db.scalar(
         select(ExportWindow).where(ExportWindow.user_id == user_id).with_for_update()
     )

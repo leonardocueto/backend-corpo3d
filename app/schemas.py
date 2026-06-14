@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -29,12 +30,13 @@ class UserOut(BaseModel):
 
 
 class UserCreate(BaseModel):
-    """Alta de usuario desde el panel."""
+    """Alta de usuario desde el panel. `tier` se ignora si es admin."""
 
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: str | None = None
     is_admin: bool = False
+    tier: Literal["free", "mensual", "anual"] = "free"
 
 
 class UserUpdate(BaseModel):
@@ -65,9 +67,13 @@ class ResetPasswordIn(BaseModel):
 
 
 class AdminUserOut(UserOut):
-    """Usuario en el listado admin: agrega los intentos de exportacion actuales.
-    `export_remaining` es null y `export_unlimited` True para admin (ilimitado)."""
+    """Usuario en el listado admin: agrega tier e intentos de exportacion.
+    `export_remaining` es null y `export_unlimited` True para usuarios ilimitados
+    (admin o tier pago vigente). `tier_expires_at` es el vto del tier pago."""
 
+    tier: str
+    tier_paid_at: datetime | None
+    tier_expires_at: datetime | None
     export_remaining: int | None
     export_unlimited: bool
 
@@ -101,3 +107,20 @@ class SetAttemptsIn(BaseModel):
     `amount` y abre una ventana fresca de 24h."""
 
     amount: int = Field(ge=0, le=999)
+
+
+# --- Tiers de usuario ---
+
+
+class SetTierIn(BaseModel):
+    """Asignacion de tier desde el panel admin."""
+
+    tier: Literal["free", "mensual", "anual"]
+
+
+class UserTierOut(BaseModel):
+    """Tier actual de un usuario."""
+
+    tier: str
+    paid_at: datetime | None
+    expires_at: datetime | None
