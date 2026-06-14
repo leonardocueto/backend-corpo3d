@@ -5,6 +5,7 @@ Todos los endpoints requieren admin (dependency a nivel router). La salida usa
 """
 
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -12,8 +13,10 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
 from app.deps import require_admin
-from app.models import User
+from app.models import ExportWindow, User
+from app.routers.exports import remaining_for
 from app.schemas import (
+    AdminUserOut,
     PasswordUpdate,
     UserCreate,
     UserOut,
@@ -35,7 +38,8 @@ def list_users(
     page_size: int = Query(20, ge=1, le=100),
     db: DbSession = Depends(get_db),
 ):
-    """Listado paginado de usuarios (mas nuevos primero)."""
+    """Listado paginado de usuarios (mas nuevos primero), con sus intentos de
+    exportacion actuales (admin = ilimitado)."""
     total = db.scalar(select(func.count()).select_from(User)) or 0
     rows = db.scalars(
         select(User)
@@ -43,8 +47,29 @@ def list_users(
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
+
+    # Ventanas de los usuarios de esta pagina en una sola query (evita N+1).
+    now = datetime.now(timezone.utc)
+    ids = [u.id for u in rows]
+    windows = (
+        db.scalars(select(ExportWindow).where(ExportWindow.user_id.in_(ids))).all()
+        if ids
+        else []
+    )
+    by_user = {w.user_id: w for w in windows}
+
+    def to_item(u: User) -> AdminUserOut:
+        base = UserOut.model_validate(u).model_dump()
+        if u.is_admin:
+            return AdminUserOut(**base, export_remaining=None, export_unlimited=True)
+        return AdminUserOut(
+            **base,
+            export_remaining=remaining_for(by_user.get(u.id), now),
+            export_unlimited=False,
+        )
+
     return UsersPage(
-        items=[UserOut.model_validate(u) for u in rows],
+        items=[to_item(u) for u in rows],
         total=total,
         page=page,
         page_size=page_size,
