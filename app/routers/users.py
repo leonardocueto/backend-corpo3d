@@ -5,6 +5,7 @@ Todos los endpoints requieren admin (dependency a nivel router). La salida usa
 """
 
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -12,8 +13,11 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
 from app.deps import require_admin
-from app.models import User
+from app.models import ExportWindow, User, UserTier
+from app.routers.exports import remaining_for
+from app.routers.tiers import PAID_TIERS, downgrade_if_expired, expiry_for, tier_is_unlimited
 from app.schemas import (
+    AdminUserOut,
     PasswordUpdate,
     UserCreate,
     UserOut,
@@ -35,7 +39,8 @@ def list_users(
     page_size: int = Query(20, ge=1, le=100),
     db: DbSession = Depends(get_db),
 ):
-    """Listado paginado de usuarios (mas nuevos primero)."""
+    """Listado paginado de usuarios (mas nuevos primero), con sus intentos de
+    exportacion actuales (admin = ilimitado)."""
     total = db.scalar(select(func.count()).select_from(User)) or 0
     rows = db.scalars(
         select(User)
@@ -43,8 +48,42 @@ def list_users(
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
+
+    # Ventanas y tiers de los usuarios de esta pagina en una query c/u (evita N+1).
+    now = datetime.now(timezone.utc)
+    ids = [u.id for u in rows]
+    windows = (
+        db.scalars(select(ExportWindow).where(ExportWindow.user_id.in_(ids))).all()
+        if ids
+        else []
+    )
+    tiers = (
+        db.scalars(select(UserTier).where(UserTier.user_id.in_(ids))).all() if ids else []
+    )
+    win_by_user = {w.user_id: w for w in windows}
+    tier_by_user = {t.user_id: t for t in tiers}
+
+    # Sincroniza (degrada a free) los tiers vencidos de la pagina; un solo commit.
+    # Lista (no generador) para evaluar TODOS, no cortar en el primer vencido.
+    if any([downgrade_if_expired(t, now) for t in tiers]):
+        db.commit()
+
+    def to_item(u: User) -> AdminUserOut:
+        base = UserOut.model_validate(u).model_dump()
+        tier_obj = tier_by_user.get(u.id)
+        unlimited = u.is_admin or tier_is_unlimited(tier_obj, now)
+        return AdminUserOut(
+            **base,
+            # tier crudo = unica fuente de verdad (ya es 'free' si vencio).
+            tier=tier_obj.tier if tier_obj else "free",
+            tier_paid_at=tier_obj.paid_at if tier_obj else None,
+            tier_expires_at=tier_obj.expires_at if tier_obj else None,
+            export_remaining=None if unlimited else remaining_for(win_by_user.get(u.id), now),
+            export_unlimited=unlimited,
+        )
+
     return UsersPage(
-        items=[UserOut.model_validate(u) for u in rows],
+        items=[to_item(u) for u in rows],
         total=total,
         page=page,
         page_size=page_size,
@@ -63,6 +102,22 @@ def create_user(payload: UserCreate, db: DbSession = Depends(get_db)):
         is_admin=payload.is_admin,
     )
     db.add(user)
+    db.flush()  # asigna user.id para el tier
+
+    # Tier inicial: solo si es pago y NO admin (free queda lazy = 3 intentos;
+    # admin es ilimitado por rol). Los intentos no se cargan a mano: free=3 por
+    # defecto, pagos = ilimitado por el tier.
+    if not user.is_admin and payload.tier in PAID_TIERS:
+        now = datetime.now(timezone.utc)
+        db.add(
+            UserTier(
+                user_id=user.id,
+                tier=payload.tier,
+                paid_at=now,
+                expires_at=expiry_for(payload.tier, now),
+            )
+        )
+
     db.commit()
     db.refresh(user)
     return user

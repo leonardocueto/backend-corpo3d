@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,5 +60,56 @@ class PasswordResetToken(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship()
+
+
+class ExportWindow(Base):
+    """Ventana rolling de 24h del limite de exportaciones por usuario (Free Tier).
+
+    Una sola fila por usuario (`user_id` unico): se reutiliza/resetea, no es
+    historico. `window_start` ancla la ventana actual; la ventana sigue viva
+    hasta `window_start + 24h` (calculado contra la hora del SERVIDOR, nunca la
+    del cliente). Los admin no tienen fila: su limite es ilimitado."""
+
+    __tablename__ = "export_windows"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True, nullable=False
+    )
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    remaining_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship()
+
+
+class UserTier(Base):
+    """Tier de un usuario. Una fila por usuario (`user_id` unico); sin fila se
+    trata como `free`. Los tier pagos (`mensual`/`anual`) dan exportaciones
+    ilimitadas mientras `expires_at` no haya vencido (se evalua contra la hora
+    del SERVIDOR al leer; un pago vencido revierte a free solo)."""
+
+    __tablename__ = "user_tiers"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True, nullable=False
+    )
+    tier: Mapped[str] = mapped_column(String(16), default="free", nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     user: Mapped["User"] = relationship()

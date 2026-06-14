@@ -5,7 +5,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
 from app.ratelimit import limiter
-from app.routers import auth, users
+from app.routers import auth, exports, tiers, users
 
 app = FastAPI(title="Dashboard API")
 
@@ -26,6 +26,8 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(exports.router)
+app.include_router(tiers.router)
 
 
 @app.get("/health")

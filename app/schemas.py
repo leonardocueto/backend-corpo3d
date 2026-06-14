@@ -1,4 +1,6 @@
 import uuid
+from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -28,12 +30,13 @@ class UserOut(BaseModel):
 
 
 class UserCreate(BaseModel):
-    """Alta de usuario desde el panel."""
+    """Alta de usuario desde el panel. `tier` se ignora si es admin."""
 
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: str | None = None
     is_admin: bool = False
+    tier: Literal["free", "mensual", "anual"] = "free"
 
 
 class UserUpdate(BaseModel):
@@ -63,10 +66,61 @@ class ResetPasswordIn(BaseModel):
     password: str = Field(min_length=8)
 
 
+class AdminUserOut(UserOut):
+    """Usuario en el listado admin: agrega tier e intentos de exportacion.
+    `export_remaining` es null y `export_unlimited` True para usuarios ilimitados
+    (admin o tier pago vigente). `tier_expires_at` es el vto del tier pago."""
+
+    tier: str
+    tier_paid_at: datetime | None
+    tier_expires_at: datetime | None
+    export_remaining: int | None
+    export_unlimited: bool
+
+
 class UsersPage(BaseModel):
     """Pagina de resultados para el listado de usuarios."""
 
-    items: list[UserOut]
+    items: list[AdminUserOut]
     total: int
     page: int
     page_size: int
+
+
+# --- Limite de exportaciones (Free Tier) ---
+
+
+class ExportAttemptsOut(BaseModel):
+    """Estado del limite de exportaciones del usuario para la ventana actual.
+
+    `remaining` es null y `unlimited` True para admin (sin limite). `reset_at`
+    es la hora (del servidor) en que la ventana de 24h vuelve a tener los 3."""
+
+    limit: int
+    remaining: int | None
+    unlimited: bool
+    reset_at: datetime | None
+
+
+class SetAttemptsIn(BaseModel):
+    """Carga manual de intentos a un usuario (panel admin). FIJA el contador a
+    `amount` y abre una ventana fresca de 24h."""
+
+    amount: int = Field(ge=0, le=999)
+
+
+# --- Tiers de usuario ---
+
+
+class SetTierIn(BaseModel):
+    """Asignacion de tier desde el panel admin."""
+
+    tier: Literal["free", "mensual", "anual"]
+
+
+class UserTierOut(BaseModel):
+    """Tier actual de un usuario."""
+
+    tier: str
+    paid_at: datetime | None
+    expires_at: datetime | None

@@ -18,6 +18,7 @@ from app.deps import get_current_user, require_admin
 from app.email import send_password_reset_email
 from app.models import PasswordResetToken, Session, User
 from app.ratelimit import limiter
+from app.routers.tiers import sync_user_tier
 from app.schemas import (
     ForgotPasswordIn,
     LoginIn,
@@ -70,6 +71,10 @@ def login(request: Request, payload: LoginIn, response: Response, db: DbSession 
         )
     )
     db.commit()
+
+    # Reconcilia el tier una vez por login: si su tier pago vencio, lo degrada a
+    # free (el login solo degrada; "pagar" es accion del admin via PUT /tiers).
+    sync_user_tier(db, user, datetime.now(timezone.utc))
 
     _set_session_cookie(response, token)
     return user
