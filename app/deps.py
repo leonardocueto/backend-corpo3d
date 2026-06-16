@@ -37,3 +37,15 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Requiere admin")
     return user
+
+
+def get_paid_user(
+    user: User = Depends(get_current_user), db: DbSession = Depends(get_db)
+) -> User:
+    """Exige cuenta ilimitada (admin o tier pago vigente). Gate de las features
+    pagas (ej. disenos guardados). Reusa la fuente unica de verdad de tiers."""
+    from app.routers.tiers import user_is_unlimited
+
+    if not user_is_unlimited(db, user, datetime.now(timezone.utc)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Requiere cuenta paga")
+    return user

@@ -124,3 +124,48 @@ class UserTierOut(BaseModel):
     tier: str
     paid_at: datetime | None
     expires_at: datetime | None
+
+
+# --- Disenos guardados (cuentas pagas) ---
+
+
+class DesignSaveIn(BaseModel):
+    """Crear (POST) o sobreescribir (PUT) un diseno. `thumbnail` es un data URL
+    JPEG que captura el front; el backend lo decodifica y lo sube a R2 (NO se
+    persiste en DB)."""
+
+    name: str = Field(min_length=1, max_length=255)
+    data: dict
+    thumbnail: str
+
+
+class DesignRenameIn(BaseModel):
+    """Renombrar sin re-subir data (PATCH)."""
+
+    name: str = Field(min_length=1, max_length=255)
+
+
+class DesignSummaryOut(BaseModel):
+    """Item del listado (liviano): SIN el JSON del diseno ni las keys internas.
+    `thumbnail_url` es una URL firmada de R2 con expiracion."""
+
+    id: uuid.UUID
+    name: str
+    thumbnail_url: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DesignDetailOut(DesignSummaryOut):
+    """Detalle para abrir en el editor: agrega el ProjectState completo (leido de R2)."""
+
+    data: dict
+
+
+class DesignsPage(BaseModel):
+    """Pagina de resultados para el listado de disenos."""
+
+    items: list[DesignSummaryOut]
+    total: int
+    page: int
+    page_size: int

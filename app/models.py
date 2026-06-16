@@ -24,6 +24,9 @@ class User(Base):
     sessions: Mapped[list["Session"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    designs: Mapped[list["UserDesign"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Session(Base):
@@ -88,6 +91,33 @@ class ExportWindow(Base):
     )
 
     user: Mapped["User"] = relationship()
+
+
+class UserDesign(Base):
+    """Diseno guardado por un usuario pago. El JSON del ProjectState y la
+    miniatura JPEG viven en Cloudflare R2 (bucket privado); aca solo va la
+    metadata + las keys del objeto. Varias filas por usuario (indexed, NO unique).
+
+    OJO: el cascade de la DB borra la FILA, no el objeto en R2; al borrar diseno o
+    usuario hay que limpiar el bucket explicitamente (ver routers/designs.py)."""
+
+    __tablename__ = "user_designs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    json_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    thumb_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship(back_populates="designs")
 
 
 class UserTier(Base):

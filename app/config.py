@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     resend_api_key: str | None = None            # si falta, en dev se loguea el link
     email_from: str = "CorpoLab 3D <onboarding@resend.dev>"
 
+    # Cloudflare R2 (storage de disenos guardados; bucket PRIVADO, S3-compatible).
+    # Opcionales: la app arranca sin esto; solo los endpoints /designs los exigen.
+    # El endpoint S3 se deriva: https://{r2_account_id}.r2.cloudflarestorage.com
+    r2_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket: str | None = None
+    r2_presign_ttl: int = 3600                    # vida (seg) de las URLs firmadas de miniatura
+
     # CORS. Acepta JSON (["https://a","https://b"]) o lista separada por comas
     # (https://a,https://b). NoDecode desactiva el parseo JSON automatico de
     # pydantic-settings para que el validator de abajo maneje ambos formatos.

@@ -9,3 +9,4 @@ pydantic-settings>=2.4
 pydantic[email]>=2.9
 slowapi>=0.1.9
 httpx>=0.27
+boto3>=1.34
