@@ -45,7 +45,16 @@ def _client():
         aws_access_key_id=settings.r2_access_key_id,
         aws_secret_access_key=settings.r2_secret_access_key,
         region_name="auto",
-        config=Config(signature_version="s3v4"),
+        # Reintentos ACOTADOS y explicitos (no el default): 3 intentos TOTALES
+        # (1 inicial + 2 reintentos) con backoff, solo ante errores transitorios
+        # (timeouts, 5xx, throttling). Acotado, nunca loop infinito. Un
+        # AccessDenied/NoSuchKey NO se reintenta (no es transitorio): falla directo.
+        # Usamos `total_max_attempts` (no `max_attempts`, que en botocore cuenta
+        # solo los reintentos) para que sean 3 intentos exactos.
+        config=Config(
+            signature_version="s3v4",
+            retries={"mode": "standard", "total_max_attempts": 3},
+        ),
     )
 
 
