@@ -40,3 +40,12 @@ services:
       - key: RESEND_API_KEY
         # Secreto de Resend (re_...). Se carga a mano en el dashboard de Render.
         sync: false
+      # Cloudflare R2 (disenos guardados; bucket privado). Secretos: a mano.
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
