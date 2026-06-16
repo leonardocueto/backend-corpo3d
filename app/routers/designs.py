@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DbSession
 
@@ -9,6 +9,7 @@ from app import storage
 from app.database import get_db
 from app.deps import get_paid_user
 from app.models import User, UserDesign
+from app.ratelimit import limiter
 from app.schemas import (
     DesignDetailOut,
     DesignRenameIn,
@@ -21,9 +22,23 @@ from app.schemas import (
 # JSON + la miniatura viven en R2 (app/storage.py); aca solo la metadata. Todo
 # scopeado por user.id: un diseno de otro usuario responde 404 (no 403, para no
 # filtrar su existencia).
+#
+# Rate limiting (slowapi, por IP): protege el costo en R2. Las escrituras
+# (POST/PUT/PATCH = operaciones clase A, las que cuestan) van mas restringidas
+# que las lecturas. La miniatura se proxea aca (el navegador nunca toca R2
+# directo) y se cachea fuerte en el browser, asi un loop no dispara reads.
 router = APIRouter(prefix="/designs", tags=["designs"])
 
 MAX_DESIGNS = 20
+
+# Limites por IP. Generosos para uso normal (guardar/abrir es accion manual),
+# pero acotan un loop accidental o un abuso autenticado.
+WRITE_LIMIT = "20/minute"   # POST / PATCH (crear / renombrar = copia en R2)
+SAVE_LIMIT = "30/minute"    # PUT (sobreescribir)
+DELETE_LIMIT = "30/minute"
+LIST_LIMIT = "60/minute"
+OPEN_LIMIT = "60/minute"    # GET /{id} (lee el JSON de R2)
+THUMB_LIMIT = "120/minute"  # GET /{id}/thumbnail (1 read; cacheado en el browser)
 
 
 def _count(db: DbSession, user_id: uuid.UUID) -> int:
@@ -39,23 +54,12 @@ def _get_owned(db: DbSession, user: User, design_id: uuid.UUID) -> UserDesign:
     return row
 
 
-def _summary(row: UserDesign) -> DesignSummaryOut:
-    return DesignSummaryOut(
-        id=row.id,
-        name=row.name,
-        thumbnail_url=storage.presign_get(row.thumb_key),
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-    )
-
-
 def _detail(row: UserDesign, data: dict | None = None) -> DesignDetailOut:
     # `data` se pasa cuando ya lo tenemos en memoria (create/update) para evitar
     # un GET extra a R2; si no, se lee del bucket.
     return DesignDetailOut(
         id=row.id,
         name=row.name,
-        thumbnail_url=storage.presign_get(row.thumb_key),
         created_at=row.created_at,
         updated_at=row.updated_at,
         data=data if data is not None else storage.read_json(row.json_key),
@@ -63,7 +67,9 @@ def _detail(row: UserDesign, data: dict | None = None) -> DesignDetailOut:
 
 
 @router.get("", response_model=DesignsPage)
+@limiter.limit(LIST_LIMIT)
 def list_designs(
+    request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=100),
     user: User = Depends(get_paid_user),
@@ -78,12 +84,17 @@ def list_designs(
         .limit(page_size)
     ).all()
     return DesignsPage(
-        items=[_summary(r) for r in rows], total=total, page=page, page_size=page_size
+        items=[DesignSummaryOut.model_validate(r) for r in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
     )
 
 
 @router.post("", response_model=DesignDetailOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit(WRITE_LIMIT)
 def create_design(
+    request: Request,
     payload: DesignSaveIn,
     user: User = Depends(get_paid_user),
     db: DbSession = Depends(get_db),
@@ -114,7 +125,9 @@ def create_design(
 
 
 @router.get("/{design_id}", response_model=DesignDetailOut)
+@limiter.limit(OPEN_LIMIT)
 def get_design(
+    request: Request,
     design_id: uuid.UUID,
     user: User = Depends(get_paid_user),
     db: DbSession = Depends(get_db),
@@ -122,8 +135,30 @@ def get_design(
     return _detail(_get_owned(db, user, design_id))
 
 
+@router.get("/{design_id}/thumbnail")
+@limiter.limit(THUMB_LIMIT)
+def get_thumbnail(
+    request: Request,
+    design_id: uuid.UUID,
+    user: User = Depends(get_paid_user),
+    db: DbSession = Depends(get_db),
+) -> Response:
+    """Proxea la miniatura desde R2 (el navegador nunca toca el bucket directo).
+    Se cachea privada en el browser; el front versiona la URL con `updated_at`
+    (?v=...) para invalidar el cache al sobreescribir el diseno."""
+    row = _get_owned(db, user, design_id)
+    data = storage.read_bytes(row.thumb_key)
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
 @router.put("/{design_id}", response_model=DesignDetailOut)
+@limiter.limit(SAVE_LIMIT)
 def update_design(
+    request: Request,
     design_id: uuid.UUID,
     payload: DesignSaveIn,
     user: User = Depends(get_paid_user),
@@ -153,7 +188,9 @@ def update_design(
 
 
 @router.patch("/{design_id}", response_model=DesignSummaryOut)
+@limiter.limit(WRITE_LIMIT)
 def rename_design(
+    request: Request,
     design_id: uuid.UUID,
     payload: DesignRenameIn,
     user: User = Depends(get_paid_user),
@@ -180,11 +217,13 @@ def rename_design(
         row.name = payload.name
         db.commit()
         db.refresh(row)
-    return _summary(row)
+    return DesignSummaryOut.model_validate(row)
 
 
 @router.delete("/{design_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(DELETE_LIMIT)
 def delete_design(
+    request: Request,
     design_id: uuid.UUID,
     user: User = Depends(get_paid_user),
     db: DbSession = Depends(get_db),

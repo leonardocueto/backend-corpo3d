@@ -147,11 +147,13 @@ class DesignRenameIn(BaseModel):
 
 class DesignSummaryOut(BaseModel):
     """Item del listado (liviano): SIN el JSON del diseno ni las keys internas.
-    `thumbnail_url` es una URL firmada de R2 con expiracion."""
+    La miniatura se pide aparte a `GET /designs/{id}/thumbnail` (proxeada por el
+    backend; el front arma la URL con id + updated_at como cache-buster)."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     name: str
-    thumbnail_url: str
     created_at: datetime
     updated_at: datetime
 

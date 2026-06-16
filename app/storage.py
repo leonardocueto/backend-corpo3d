@@ -96,13 +96,11 @@ def read_json(json_key: str) -> dict:
     return json.loads(obj["Body"].read())
 
 
-def presign_get(key: str) -> str:
-    """URL firmada de lectura (para que el <img> del front cargue la miniatura)."""
-    return _client().generate_presigned_url(
-        "get_object",
-        Params={"Bucket": settings.r2_bucket, "Key": key},
-        ExpiresIn=settings.r2_presign_ttl,
-    )
+def read_bytes(key: str) -> bytes:
+    """Bytes crudos de un objeto (para que el backend proxee la miniatura: el
+    navegador nunca toca R2 directo, todo pasa por endpoints rate-limited)."""
+    obj = _client().get_object(Bucket=settings.r2_bucket, Key=key)
+    return obj["Body"].read()
 
 
 def copy_object(src_key: str, dst_key: str) -> None:
