@@ -41,6 +41,19 @@ OPEN_LIMIT = "60/minute"    # GET /{id} (lee el JSON de R2)
 THUMB_LIMIT = "120/minute"  # GET /{id}/thumbnail (1 read; cacheado en el browser)
 
 
+def _clean_name(raw: str) -> str:
+    """Nombre saneado (sin espacios al borde) y no-vacio. Red de seguridad por si
+    el front se saltea: devuelve 422 con un detalle claro que el front mapea al
+    error inline del campo "Nombre del proyecto"."""
+    name = raw.strip()
+    if not name:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El nombre del proyecto es requerido",
+        )
+    return name
+
+
 def _count(db: DbSession, user_id: uuid.UUID) -> int:
     return db.scalar(
         select(func.count()).select_from(UserDesign).where(UserDesign.user_id == user_id)
@@ -99,6 +112,7 @@ def create_design(
     user: User = Depends(get_paid_user),
     db: DbSession = Depends(get_db),
 ) -> DesignDetailOut:
+    name = _clean_name(payload.name)
     if _count(db, user.id) >= MAX_DESIGNS:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -107,13 +121,13 @@ def create_design(
 
     now = datetime.now(timezone.utc)
     design_id = uuid.uuid4()
-    json_key, thumb_key = storage.design_keys(user.id, design_id, payload.name, now)
+    json_key, thumb_key = storage.design_keys(user.id, design_id, name, now)
     storage.put_design(json_key, thumb_key, payload.data, payload.thumbnail)
 
     row = UserDesign(
         id=design_id,
         user_id=user.id,
-        name=payload.name,
+        name=name,
         json_key=json_key,
         thumb_key=thumb_key,
         created_at=now,
@@ -168,14 +182,15 @@ def update_design(
     nombre, la key (parte legible) cambia -> se escribe en la nueva y se borra la
     vieja (best-effort, despues de commitear la fila)."""
     row = _get_owned(db, user, design_id)
+    name = _clean_name(payload.name)
 
     new_json_key, new_thumb_key = storage.design_keys(
-        user.id, row.id, payload.name, row.created_at
+        user.id, row.id, name, row.created_at
     )
     storage.put_design(new_json_key, new_thumb_key, payload.data, payload.thumbnail)
 
     old_keys = (row.json_key, row.thumb_key)
-    row.name = payload.name
+    row.name = name
     row.json_key = new_json_key
     row.thumb_key = new_thumb_key
     db.commit()
@@ -199,8 +214,9 @@ def rename_design(
     """Renombrar sin re-subir data. Como el nombre va en la key, mueve el objeto
     (copy + delete) si la key cambia."""
     row = _get_owned(db, user, design_id)
+    name = _clean_name(payload.name)
     new_json_key, new_thumb_key = storage.design_keys(
-        user.id, row.id, payload.name, row.created_at
+        user.id, row.id, name, row.created_at
     )
 
     if (new_json_key, new_thumb_key) != (row.json_key, row.thumb_key):
@@ -209,12 +225,12 @@ def rename_design(
         old_keys = (row.json_key, row.thumb_key)
         row.json_key = new_json_key
         row.thumb_key = new_thumb_key
-        row.name = payload.name
+        row.name = name
         db.commit()
         db.refresh(row)
         storage.delete_keys(*old_keys)
     else:
-        row.name = payload.name
+        row.name = name
         db.commit()
         db.refresh(row)
     return DesignSummaryOut.model_validate(row)

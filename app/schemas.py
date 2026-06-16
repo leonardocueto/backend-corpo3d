@@ -132,9 +132,10 @@ class UserTierOut(BaseModel):
 class DesignSaveIn(BaseModel):
     """Crear (POST) o sobreescribir (PUT) un diseno. `thumbnail` es un data URL
     JPEG que captura el front; el backend lo decodifica y lo sube a R2 (NO se
-    persiste en DB)."""
+    persiste en DB). El nombre no-vacio se valida en el router (trim) para devolver
+    un error claro y consistente (un name solo-espacios pasaria min_length)."""
 
-    name: str = Field(min_length=1, max_length=255)
+    name: str = Field(max_length=255)
     data: dict
     thumbnail: str
 
@@ -142,7 +143,7 @@ class DesignSaveIn(BaseModel):
 class DesignRenameIn(BaseModel):
     """Renombrar sin re-subir data (PATCH)."""
 
-    name: str = Field(min_length=1, max_length=255)
+    name: str = Field(max_length=255)
 
 
 class DesignSummaryOut(BaseModel):
