@@ -172,12 +172,18 @@ async def webhook(request: Request, db: DbSession = Depends(get_db)) -> dict:
     siempre 200 salvo firma invalida (401), para que MP no reintente en vano."""
     data_id = request.query_params.get("data.id") or request.query_params.get("id")
 
-    if not _valid_signature(
-        request.headers.get("x-signature"),
-        request.headers.get("x-request-id"),
-        data_id,
-    ):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Firma invalida")
+    # En produccion la firma se exige siempre. Con MP_WEBHOOK_VERIFY=false (solo
+    # para testear en el sandbox de MP) se saltea: la re-consulta del pago a MP de
+    # mas abajo es la que igual valida que el pago exista y este aprobado.
+    if settings.mp_webhook_verify:
+        if not _valid_signature(
+            request.headers.get("x-signature"),
+            request.headers.get("x-request-id"),
+            data_id,
+        ):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Firma invalida")
+    else:
+        logger.warning("WEBHOOK firma DESACTIVADA (MP_WEBHOOK_VERIFY=false)")
 
     # Solo procesamos notificaciones de pago (MP manda otras: merchant_order, etc.).
     topic = request.query_params.get("type") or request.query_params.get("topic")

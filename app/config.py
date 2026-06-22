@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # PUBLICA del notification_url (el webhook NO llega a localhost).
     mp_access_token: str | None = None
     mp_webhook_secret: str | None = None
+    # Verificacion de firma del webhook. En el sandbox de MP la firma de los pagos
+    # de prueba no coincide con el secret del panel (quirk conocido); poner False
+    # para testear el flujo (la re-consulta del pago a MP ya valida que sea real).
+    # En produccion DEBE quedar True.
+    mp_webhook_verify: bool = True
     backend_url: str = "http://localhost:8000"
     price_mensual: int = 10000
     price_anual: int = 100000
