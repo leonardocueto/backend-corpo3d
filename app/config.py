@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
 
+    # Mercado Pago (Checkout Pro / pago unico). Opcionales: la app arranca sin
+    # esto; solo los endpoints /payments los exigen. El tier se activa SOLO desde
+    # el webhook validado (firma HMAC con mp_webhook_secret), nunca desde el
+    # redirect del navegador. Los precios viven aca (anti-tamper): el cliente
+    # manda solo el plan; el monto lo fija el servidor. backend_url es la base
+    # PUBLICA del notification_url (el webhook NO llega a localhost).
+    mp_access_token: str | None = None
+    mp_webhook_secret: str | None = None
+    backend_url: str = "http://localhost:8000"
+    price_mensual: int = 10000
+    price_anual: int = 100000
+    currency_id: str = "ARS"
+
     # CORS. Acepta JSON (["https://a","https://b"]) o lista separada por comas
     # (https://a,https://b). NoDecode desactiva el parseo JSON automatico de
     # pydantic-settings para que el validator de abajo maneje ambos formatos.

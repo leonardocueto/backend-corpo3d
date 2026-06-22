@@ -66,6 +66,24 @@ def expiry_for(tier_name: str, now: datetime) -> datetime:
     return now + TIER_DURATION[tier_name]
 
 
+def activate_paid_tier(
+    db: DbSession, user_id: uuid.UUID, plan: str, now: datetime
+) -> UserTier:
+    """Activa (o renueva) un tier pago: get-or-create con lock, setea
+    tier/paid_at/expires_at desde `now`. NO commitea (lo hace el caller, asi el
+    webhook activa el tier y registra el Payment en UNA sola transaccion). Lo usan
+    el endpoint admin (set_user_tier) y el webhook de Mercado Pago.
+
+    Renovacion: cuenta desde `now`. Si se quisiera extender desde el vencimiento
+    vigente (sin "perder" dias), seria expires_at = expiry_for(plan, max(now,
+    tier.expires_at or now)) -- anotado, no critico para el pago unico."""
+    tier = _get_or_create_locked(db, user_id)
+    tier.tier = plan
+    tier.paid_at = now
+    tier.expires_at = expiry_for(plan, now)
+    return tier
+
+
 def _get_or_create_locked(db: DbSession, user_id: uuid.UUID) -> UserTier:
     """Fila del usuario con lock de escritura; la crea si no existe (con la misma
     proteccion ante carrera que exports.set_user_attempts)."""
@@ -107,15 +125,13 @@ def set_user_tier(
         )
 
     now = datetime.now(timezone.utc)
-    tier = _get_or_create_locked(db, user_id)
     if payload.tier == "free":
+        tier = _get_or_create_locked(db, user_id)
         tier.tier = "free"
         tier.paid_at = None
         tier.expires_at = None
     else:
-        tier.tier = payload.tier
-        tier.paid_at = now
-        tier.expires_at = expiry_for(payload.tier, now)
+        tier = activate_paid_tier(db, user_id, payload.tier, now)
 
     db.commit()
     db.refresh(tier)
