@@ -20,6 +20,7 @@ from app.models import PasswordResetToken, Session, User
 from app.ratelimit import limiter
 from app.routers.tiers import sync_user_tier
 from app.schemas import (
+    ChangePasswordIn,
     ForgotPasswordIn,
     LoginIn,
     RegisterIn,
@@ -126,6 +127,23 @@ def register(request: Request, payload: RegisterIn, db: DbSession = Depends(get_
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("5/minute")
+def change_password(
+    request: Request,
+    payload: ChangePasswordIn,
+    user: User = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+):
+    """Cambio de la propia contraseña: requiere sesion activa (get_current_user) y
+    verifica la clave actual. A diferencia de /reset-password, NO revoca sesiones:
+    la sesion actual (y las demas) siguen vivas."""
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Contrasena actual incorrecta")
+    user.password_hash = hash_password(payload.new_password)
+    db.commit()
 
 
 @router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
