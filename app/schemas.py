@@ -53,6 +53,13 @@ class PasswordUpdate(BaseModel):
     password: str = Field(min_length=8)
 
 
+class ChangePasswordIn(BaseModel):
+    """Cambio de la propia contraseña (usuario con sesion activa)."""
+
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
 class ForgotPasswordIn(BaseModel):
     """Pedido de link de recuperacion (publico, sin sesion)."""
 
