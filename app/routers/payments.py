@@ -56,11 +56,6 @@ def _valid_signature(
     `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` (data.id en minusculas).
     Sin secret configurado o firma que no matchea -> False (se rechaza con 401)."""
     secret = settings.mp_webhook_secret
-    # TEMP DEBUG: quitar despues de diagnosticar la firma del webhook.
-    logger.warning(
-        "WEBHOOK DEBUG sig=%r reqid=%r data_id=%r secret_len=%s",
-        x_signature, x_request_id, data_id, len(secret) if secret else 0,
-    )
     if not secret or not x_signature or not data_id:
         return False
     parts = dict(
@@ -74,11 +69,6 @@ def _valid_signature(
     expected = hmac.new(
         secret.encode("utf-8"), manifest.encode("utf-8"), hashlib.sha256
     ).hexdigest()
-    # TEMP DEBUG
-    logger.warning(
-        "WEBHOOK DEBUG manifest=%r expected=%s v1=%s match=%s",
-        manifest, expected, v1, hmac.compare_digest(expected, v1),
-    )
     return hmac.compare_digest(expected, v1)
 
 
@@ -172,18 +162,12 @@ async def webhook(request: Request, db: DbSession = Depends(get_db)) -> dict:
     siempre 200 salvo firma invalida (401), para que MP no reintente en vano."""
     data_id = request.query_params.get("data.id") or request.query_params.get("id")
 
-    # En produccion la firma se exige siempre. Con MP_WEBHOOK_VERIFY=false (solo
-    # para testear en el sandbox de MP) se saltea: la re-consulta del pago a MP de
-    # mas abajo es la que igual valida que el pago exista y este aprobado.
-    if settings.mp_webhook_verify:
-        if not _valid_signature(
-            request.headers.get("x-signature"),
-            request.headers.get("x-request-id"),
-            data_id,
-        ):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Firma invalida")
-    else:
-        logger.warning("WEBHOOK firma DESACTIVADA (MP_WEBHOOK_VERIFY=false)")
+    if not _valid_signature(
+        request.headers.get("x-signature"),
+        request.headers.get("x-request-id"),
+        data_id,
+    ):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Firma invalida")
 
     # Solo procesamos notificaciones de pago (MP manda otras: merchant_order, etc.).
     topic = request.query_params.get("type") or request.query_params.get("topic")
