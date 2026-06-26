@@ -27,6 +27,14 @@ class SignupIn(BaseModel):
     full_name: str | None = None
 
 
+class GoogleAuthIn(BaseModel):
+    """Login con Google. `credential` es el ID token (JWT) que devuelve Google
+    Identity Services en el front. Se verifica SOLO en el backend (firma + aud +
+    exp + email_verified). La salida sigue siendo UserOut (sin campos sensibles)."""
+
+    credential: str
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
