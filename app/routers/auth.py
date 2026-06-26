@@ -16,12 +16,14 @@ from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_admin
 from app.email import send_password_reset_email
+from app.google_oauth import GoogleAuthError, verify_google_id_token
 from app.models import PasswordResetToken, Session, User
 from app.ratelimit import limiter
 from app.routers.tiers import sync_user_tier
 from app.schemas import (
     ChangePasswordIn,
     ForgotPasswordIn,
+    GoogleAuthIn,
     LoginIn,
     RegisterIn,
     ResetPasswordIn,
@@ -76,6 +78,79 @@ def login(request: Request, payload: LoginIn, response: Response, db: DbSession 
 
     # Reconcilia el tier una vez por login: si su tier pago vencio, lo degrada a
     # free (el login solo degrada; "pagar" es accion del admin via PUT /tiers).
+    sync_user_tier(db, user, datetime.now(timezone.utc))
+
+    _set_session_cookie(response, token)
+    return user
+
+
+@router.post("/google", response_model=UserOut)
+@limiter.limit("10/minute")
+def google_login(
+    request: Request,
+    payload: GoogleAuthIn,
+    response: Response,
+    db: DbSession = Depends(get_db),
+):
+    """Login con Google (OIDC). Google SOLO verifica identidad: el usuario vive en
+    nuestra tabla `users` y emitimos nuestra propia cookie de sesion (identico al
+    final de `login`, el front no nota diferencia). Autocrea (tier free) si el email
+    no existe, o linkea el `google_sub` a una cuenta password existente del mismo
+    email. La fuente de verdad es el ID token verificado en el server, nunca el
+    `credential` crudo del navegador."""
+    try:
+        info = verify_google_id_token(payload.credential)
+    except GoogleAuthError:
+        # Token invalido/expirado/aud incorrecta, o Google sin configurar.
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credencial de Google invalida")
+
+    # email_verified obligatorio: solo asi es seguro crear/linkear por email.
+    if not info.get("email_verified"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Email de Google no verificado")
+
+    sub = info["sub"]
+    email = info["email"]
+    name = info.get("name") or email.split("@")[0]  # la app usa full_name para mostrar
+
+    # 1ro por google_sub (id estable); si no, por email (para linkear cuentas password).
+    user = db.scalar(select(User).where(User.google_sub == sub))
+    if user is None:
+        user = db.scalar(select(User).where(User.email == email))
+        if user is not None:
+            # Linkeo: conserva su password_hash (puede seguir usando ambos metodos).
+            user.google_sub = sub
+            if not user.full_name:
+                user.full_name = name
+        else:
+            # Autocreacion: usuario comun, sin password, tier free (sin fila lazy).
+            user = User(
+                email=email,
+                full_name=name,
+                password_hash=None,
+                is_admin=False,
+                is_active=True,
+                google_sub=sub,
+                auth_provider="google",
+            )
+            db.add(user)
+
+    if not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+
+    db.flush()  # asigna user.id si recien se creo (para la FK de Session)
+
+    # Auto-login: misma cola de sesion que `login`.
+    token = generate_session_token()
+    db.add(
+        Session(
+            user_id=user.id,
+            token_hash=hash_session_token(token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.session_days),
+        )
+    )
+    db.commit()
+
+    # Reconcilia el tier (degrada si vencio); no-op para un usuario recien creado.
     sync_user_tier(db, user, datetime.now(timezone.utc))
 
     _set_session_cookie(response, token)
