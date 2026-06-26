@@ -17,6 +17,24 @@ class RegisterIn(BaseModel):
     is_admin: bool = False
 
 
+class SignupIn(BaseModel):
+    """Alta self-serve (endpoint publico). A diferencia de RegisterIn (admin),
+    NO acepta `is_admin` ni `tier`: el endpoint fuerza siempre usuario comun +
+    tier free. `password` con minimo 8 (igual que UserCreate y change-password)."""
+
+    email: EmailStr
+    password: str = Field(min_length=8)
+    full_name: str | None = None
+
+
+class GoogleAuthIn(BaseModel):
+    """Login con Google. `credential` es el ID token (JWT) que devuelve Google
+    Identity Services en el front. Se verifica SOLO en el backend (firma + aud +
+    exp + email_verified). La salida sigue siendo UserOut (sin campos sensibles)."""
+
+    credential: str
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

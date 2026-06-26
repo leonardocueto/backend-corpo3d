@@ -83,7 +83,17 @@ backend/
    `Depends(get_current_user)`**.
 3. `POST /auth/logout`: setea `revoked_at` (revocación real en DB) + borra la cookie.
 4. `POST /auth/register`: `Depends(require_admin)` → solo un admin autenticado crea usuarios.
-   El primer admin se crea con `scripts/create_admin.py` (huevo-gallina).
+   El primer admin se crea con `scripts/create_admin.py` (huevo-gallina). El alta admin con
+   tier vive además en `POST /users` (router admin-only), que es el que usa el panel.
+5. `POST /auth/signup`: alta **self-serve PÚBLICA** (sin admin). Crea siempre usuario común
+   (`is_admin=False`) en tier free e inicia sesión al toque (misma cookie que `login`). No
+   acepta `is_admin`/`tier` del cliente (anti-escalada). Rate limit 5/min.
+6. `POST /auth/google`: login con **Google (OIDC)**. El front manda el ID token (`credential`);
+   el backend lo verifica (`app/google_oauth.py`, firma + `aud` == `GOOGLE_CLIENT_ID` + `exp` +
+   `email_verified`). Busca por `google_sub`, si no por email (linkea cuentas password del mismo
+   email), si no **autocrea** (tier free, `password_hash=None`, `auth_provider='google'`). Termina
+   con la **misma cookie** que `login`. Sin `GOOGLE_CLIENT_ID` cargado responde 401. Google solo
+   verifica identidad: la fuente de verdad sigue siendo `users` en Postgres.
 
 ## Seguridad — invariantes a NO romper
 

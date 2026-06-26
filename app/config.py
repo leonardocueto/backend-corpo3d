@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     price_anual: int = 100000
     currency_id: str = "ARS"
 
+    # Login con Google (OAuth 2.0 / OIDC). El Client ID es PUBLICO (sirve para
+    # validar la `aud` del ID token); no hay client secret. Opcional: si falta,
+    # el endpoint /auth/google responde 503 (la app arranca igual).
+    google_client_id: str | None = None
+
     # CORS. Acepta JSON (["https://a","https://b"]) o lista separada por comas
     # (https://a,https://b). NoDecode desactiva el parseo JSON automatico de
     # pydantic-settings para que el validator de abajo maneje ambos formatos.
