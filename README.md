@@ -12,9 +12,14 @@ persistida en Postgres (sin JWT, sin tokens en el front). La cookie dura **7 dí
 | Método | Ruta | Auth | Descripción |
 | --- | --- | --- | --- |
 | POST | `/auth/login` | — | Valida email+password, crea sesión y setea la cookie. |
+| POST | `/auth/signup` | — | **Registro público**: crea usuario común (tier free, no admin) e inicia sesión. |
+| POST | `/auth/google` | — | **Login con Google** (OIDC, latente: 401 sin `GOOGLE_CLIENT_ID`). Autocrea/linkea y abre sesión. |
 | GET | `/auth/me` | cookie | Devuelve el usuario de la sesión actual (401 si no es válida). |
 | POST | `/auth/logout` | cookie | Revoca la sesión y borra la cookie. |
-| POST | `/auth/register` | admin | Crea un usuario (solo un admin autenticado). |
+| POST | `/auth/register` | admin | Crea un usuario (solo un admin autenticado). El alta con tier vive en `POST /users`. |
+| POST | `/auth/change-password` | cookie | Cambia la propia contraseña (verifica la actual). |
+| POST | `/auth/forgot-password` | — | Pide link de reset por email (responde 204 siempre, anti-enumeración). |
+| POST | `/auth/reset-password` | — | Setea nueva contraseña con el token del email (single-use). |
 | GET | `/health` | — | Healthcheck. |
 
 ## Setup con Docker (recomendado)
@@ -105,5 +110,7 @@ curl -i -b cookies.txt http://localhost:8000/auth/me               # 401 (sesió
 
 ## Pendiente / futuro
 - Limpieza de sesiones vencidas (job periódico o `DELETE` en login).
-- Rate limiting en `/auth/login` si se expone a internet.
-- Cablear el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`).
+- ~~Rate limiting~~ (hecho): `slowapi` por IP en `/auth/login`, `/auth/signup`, `/auth/register`, etc.
+- ~~Cablear el frontend Nuxt~~ (hecho): login, registro (`/registrarse`), recuperación de contraseña,
+  middleware de auth y capa de servicio con `credentials: "include"`.
+- **Login con Google** (OIDC): código listo y latente; falta cargar `GOOGLE_CLIENT_ID` para activarlo (ver `OAuth.md`).

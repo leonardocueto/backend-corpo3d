@@ -66,8 +66,11 @@ backend/
 
 ## Modelo de datos (`models.py`)
 
-- **User**: `id` (UUID), `email` (único), `full_name`, `password_hash`, `is_active`,
-  `is_admin`, `created_at`.
+- **User**: `id` (UUID), `email` (único), `full_name`, `password_hash` (**nullable**: los
+  usuarios creados por Google no tienen password), `is_active`, `is_admin`, `google_sub`
+  (**único, nullable**: `sub` estable de la cuenta de Google para linkeo), `auth_provider`
+  (`'password' | 'google'`, default `'password'`), `created_at`. (Columnas de Google: migración
+  `0007_google_oauth`.)
 - **Session**: `id` (UUID), `user_id` (FK, `ON DELETE CASCADE`), `token_hash` (único),
   `expires_at`, `created_at`, `revoked_at` (nullable). Borrar un User borra sus sesiones.
 
