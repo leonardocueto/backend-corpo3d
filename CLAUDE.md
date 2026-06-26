@@ -83,7 +83,11 @@ backend/
    `Depends(get_current_user)`**.
 3. `POST /auth/logout`: setea `revoked_at` (revocación real en DB) + borra la cookie.
 4. `POST /auth/register`: `Depends(require_admin)` → solo un admin autenticado crea usuarios.
-   El primer admin se crea con `scripts/create_admin.py` (huevo-gallina).
+   El primer admin se crea con `scripts/create_admin.py` (huevo-gallina). El alta admin con
+   tier vive además en `POST /users` (router admin-only), que es el que usa el panel.
+5. `POST /auth/signup`: alta **self-serve PÚBLICA** (sin admin). Crea siempre usuario común
+   (`is_admin=False`) en tier free e inicia sesión al toque (misma cookie que `login`). No
+   acepta `is_admin`/`tier` del cliente (anti-escalada). Rate limit 5/min.
 
 ## Seguridad — invariantes a NO romper
 

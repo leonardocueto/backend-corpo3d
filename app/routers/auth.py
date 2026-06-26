@@ -25,6 +25,7 @@ from app.schemas import (
     LoginIn,
     RegisterIn,
     ResetPasswordIn,
+    SignupIn,
     UserOut,
 )
 from app.security import (
@@ -126,6 +127,46 @@ def register(request: Request, payload: RegisterIn, db: DbSession = Depends(get_
     db.add(user)
     db.commit()
     db.refresh(user)
+    return user
+
+
+@router.post("/signup", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/minute")
+def signup(
+    request: Request,
+    payload: SignupIn,
+    response: Response,
+    db: DbSession = Depends(get_db),
+):
+    """Alta self-serve (PUBLICA, sin admin). Crea SIEMPRE un usuario comun
+    (`is_admin=False`) en tier free (sin fila en `user_tiers`: free es lazy) e
+    inicia sesion al toque (cookie HttpOnly), igual que `login`. El front recibe
+    el user y la cookie en una sola llamada."""
+    if db.scalar(select(User).where(User.email == payload.email)):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Email ya registrado")
+    user = User(
+        email=payload.email,
+        full_name=payload.full_name,
+        password_hash=hash_password(payload.password),
+        is_admin=False,  # forzado: el endpoint publico nunca crea admins
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    # Auto-login: misma cola de sesion que `login` (token plano solo en la cookie,
+    # en DB solo su HMAC). Un usuario nuevo no tiene tier que sincronizar.
+    token = generate_session_token()
+    db.add(
+        Session(
+            user_id=user.id,
+            token_hash=hash_session_token(token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.session_days),
+        )
+    )
+    db.commit()
+
+    _set_session_cookie(response, token)
     return user
 
 
