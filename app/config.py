@@ -27,6 +27,11 @@ class Settings(BaseSettings):
 
     # OTP de login (2do factor por email). El codigo de 6 digitos vive poco y
     # admite pocos intentos (baja entropia: 1M de combinaciones).
+    # `otp_enabled` es el switch maestro: con False (default) el login inicia sesion
+    # directo como antes (sin OTP); recien con True se exige el codigo. Asi se puede
+    # deployar el codigo y prender el OTP solo cuando el envio de emails este listo
+    # (dominio verificado en Resend, etc.).
+    otp_enabled: bool = False
     otp_minutes: int = 5                          # vida del codigo OTP
     otp_max_attempts: int = 5                     # intentos de verificacion antes de invalidar
 
