@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     resend_api_key: str | None = None            # si falta, en dev se loguea el link
     email_from: str = "CorpoLab 3D <onboarding@resend.dev>"
 
+    # OTP de login (2do factor por email). El codigo de 6 digitos vive poco y
+    # admite pocos intentos (baja entropia: 1M de combinaciones).
+    otp_minutes: int = 5                          # vida del codigo OTP
+    otp_max_attempts: int = 5                     # intentos de verificacion antes de invalidar
+
     # Cloudflare R2 (storage de disenos guardados; bucket PRIVADO, S3-compatible).
     # Opcionales: la app arranca sin esto; solo los endpoints /designs los exigen.
     # El endpoint S3 se deriva: https://{r2_account_id}.r2.cloudflarestorage.com

@@ -15,9 +15,9 @@ from sqlalchemy.orm import Session as DbSession
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_admin
-from app.email import send_password_reset_email
+from app.email import send_login_otp_email, send_password_reset_email
 from app.google_oauth import GoogleAuthError, verify_google_id_token
-from app.models import PasswordResetToken, Session, User
+from app.models import LoginOtp, PasswordResetToken, Session, User
 from app.ratelimit import limiter
 from app.routers.tiers import sync_user_tier
 from app.schemas import (
@@ -25,12 +25,16 @@ from app.schemas import (
     ForgotPasswordIn,
     GoogleAuthIn,
     LoginIn,
+    LoginResponse,
     RegisterIn,
+    ResendOtpIn,
     ResetPasswordIn,
     SignupIn,
     UserOut,
+    VerifyOtpIn,
 )
 from app.security import (
+    generate_otp,
     generate_session_token,
     generate_token,
     hash_password,
@@ -55,17 +59,10 @@ def _set_session_cookie(response: Response, token: str) -> None:
     )
 
 
-@router.post("/login", response_model=UserOut)
-@limiter.limit("5/minute")
-def login(request: Request, payload: LoginIn, response: Response, db: DbSession = Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == payload.email))
-    # Verificar siempre el password (aunque el user no exista) para no filtrar
-    # por timing si un email está registrado.
-    if user is None or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
-    if not user.is_active:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
-
+def _start_session(db: DbSession, user: User, response: Response) -> None:
+    """Cierra el login: crea la sesion (token plano solo en la cookie, en DB solo su
+    HMAC), reconcilia el tier y setea la cookie. Igual que el final del login viejo;
+    ahora lo usa `verify_otp` (el 2do paso) y queda disponible para reuso."""
     token = generate_session_token()
     db.add(
         Session(
@@ -75,13 +72,108 @@ def login(request: Request, payload: LoginIn, response: Response, db: DbSession 
         )
     )
     db.commit()
-
     # Reconcilia el tier una vez por login: si su tier pago vencio, lo degrada a
     # free (el login solo degrada; "pagar" es accion del admin via PUT /tiers).
     sync_user_tier(db, user, datetime.now(timezone.utc))
-
     _set_session_cookie(response, token)
+
+
+def _issue_login_otp(db: DbSession, user: User, background: BackgroundTasks) -> None:
+    """Emite un OTP de login: invalida los OTP previos sin usar del usuario (un solo
+    codigo activo a la vez), guarda el HMAC del nuevo con vida corta y manda el codigo
+    por email en background (la respuesta no espera al proveedor)."""
+    db.execute(
+        update(LoginOtp)
+        .where(LoginOtp.user_id == user.id, LoginOtp.used_at.is_(None))
+        .values(used_at=datetime.now(timezone.utc))
+    )
+    code = generate_otp()
+    db.add(
+        LoginOtp(
+            user_id=user.id,
+            code_hash=hash_token(code),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.otp_minutes),
+        )
+    )
+    db.commit()
+    background.add_task(send_login_otp_email, user.email, code)
+
+
+@router.post("/login", response_model=LoginResponse)
+@limiter.limit("5/minute")
+def login(
+    request: Request,
+    payload: LoginIn,
+    background: BackgroundTasks,
+    db: DbSession = Depends(get_db),
+):
+    """Paso 1 del login: valida credenciales y dispara un OTP por email. NO entrega
+    la sesion todavia; el cliente debe verificar el codigo en `/auth/verify-otp`."""
+    user = db.scalar(select(User).where(User.email == payload.email))
+    # Verificar siempre el password (aunque el user no exista) para no filtrar
+    # por timing si un email está registrado.
+    if user is None or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
+    if not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+
+    _issue_login_otp(db, user, background)
+    return LoginResponse(otp_required=True)
+
+
+@router.post("/verify-otp", response_model=UserOut)
+@limiter.limit("10/minute")
+def verify_otp(
+    request: Request,
+    payload: VerifyOtpIn,
+    response: Response,
+    db: DbSession = Depends(get_db),
+):
+    """Paso 2 del login: consume el OTP y, si es valido, inicia la sesion (cookie).
+    Codigo single-use + corto + con tope de intentos. Respuesta 400 GENERICA: no
+    distingue "no existe" de "vencido" de "incorrecto" (anti-enumeracion)."""
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, detail="Codigo invalido o expirado")
+
+    user = db.scalar(select(User).where(User.email == payload.email))
+    if user is None or not user.is_active:
+        raise invalid
+
+    # OTP mas reciente sin usar del usuario (un solo activo a la vez).
+    otp = db.scalar(
+        select(LoginOtp)
+        .where(LoginOtp.user_id == user.id, LoginOtp.used_at.is_(None))
+        .order_by(LoginOtp.created_at.desc())
+    )
+    now = datetime.now(timezone.utc)
+    if otp is None or otp.expires_at <= now or otp.attempts >= settings.otp_max_attempts:
+        raise invalid
+
+    if otp.code_hash != hash_token(payload.code):
+        # Cuenta el intento fallido; al llegar al tope, el codigo queda inservible.
+        otp.attempts += 1
+        if otp.attempts >= settings.otp_max_attempts:
+            otp.used_at = now  # invalida explicitamente tras agotar los intentos
+        db.commit()
+        raise invalid
+
+    otp.used_at = now
+    _start_session(db, user, response)
     return user
+
+
+@router.post("/resend-otp", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("1/minute")
+def resend_otp(
+    request: Request,
+    payload: ResendOtpIn,
+    background: BackgroundTasks,
+    db: DbSession = Depends(get_db),
+):
+    """Reenvia un OTP nuevo (boton "reenviar" de la pantalla de verificacion).
+    Responde SIEMPRE 204, exista o no el email (anti-enumeracion)."""
+    user = db.scalar(select(User).where(User.email == payload.email))
+    if user is not None and user.is_active:
+        _issue_login_otp(db, user, background)
 
 
 @router.post("/google", response_model=UserOut)
