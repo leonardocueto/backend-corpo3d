@@ -35,11 +35,23 @@ class GoogleAuthIn(BaseModel):
     credential: str
 
 
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: EmailStr
+    full_name: str | None
+    is_admin: bool
+
+
 class LoginResponse(BaseModel):
-    """Respuesta del login con OTP: NO entrega la sesion todavia. El usuario debe
-    verificar el codigo enviado por email en `POST /auth/verify-otp`."""
+    """Respuesta del paso 1 del login. Dos casos segun `OTP_ENABLED`:
+    - OTP ON:  `otp_required=True`, `user=None` -> falta verificar el codigo por email.
+    - OTP OFF: `otp_required=False`, `user=<UserOut>` -> la sesion ya quedo iniciada
+      (cookie seteada), igual que el login de un solo paso."""
 
     otp_required: bool = True
+    user: UserOut | None = None
 
 
 class VerifyOtpIn(BaseModel):
@@ -53,15 +65,6 @@ class ResendOtpIn(BaseModel):
     """Reenvio del codigo OTP (boton "reenviar" de la pantalla de verificacion)."""
 
     email: EmailStr
-
-
-class UserOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    full_name: str | None
-    is_admin: bool
 
 
 # --- Gestion de usuarios (panel admin) ---

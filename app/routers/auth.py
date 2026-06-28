@@ -105,10 +105,14 @@ def login(
     request: Request,
     payload: LoginIn,
     background: BackgroundTasks,
+    response: Response,
     db: DbSession = Depends(get_db),
 ):
-    """Paso 1 del login: valida credenciales y dispara un OTP por email. NO entrega
-    la sesion todavia; el cliente debe verificar el codigo en `/auth/verify-otp`."""
+    """Paso 1 del login. Valida credenciales y, segun `OTP_ENABLED`:
+    - ON:  dispara un OTP por email y responde `otp_required=True` (sin sesion aun;
+      el cliente verifica el codigo en `/auth/verify-otp`).
+    - OFF: inicia sesion directo (cookie) y responde `otp_required=False` + el user,
+      igual que el login de un solo paso de antes."""
     user = db.scalar(select(User).where(User.email == payload.email))
     # Verificar siempre el password (aunque el user no exista) para no filtrar
     # por timing si un email está registrado.
@@ -116,6 +120,11 @@ def login(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+
+    if not settings.otp_enabled:
+        # Sin OTP: login directo (compat con el flujo previo).
+        _start_session(db, user, response)
+        return LoginResponse(otp_required=False, user=user)
 
     _issue_login_otp(db, user, background)
     return LoginResponse(otp_required=True)
