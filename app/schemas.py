@@ -35,6 +35,26 @@ class GoogleAuthIn(BaseModel):
     credential: str
 
 
+class LoginResponse(BaseModel):
+    """Respuesta del login con OTP: NO entrega la sesion todavia. El usuario debe
+    verificar el codigo enviado por email en `POST /auth/verify-otp`."""
+
+    otp_required: bool = True
+
+
+class VerifyOtpIn(BaseModel):
+    """Verificacion del codigo OTP recibido por email (2do paso del login)."""
+
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+
+
+class ResendOtpIn(BaseModel):
+    """Reenvio del codigo OTP (boton "reenviar" de la pantalla de verificacion)."""
+
+    email: EmailStr
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

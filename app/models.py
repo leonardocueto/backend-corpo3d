@@ -78,6 +78,30 @@ class PasswordResetToken(Base):
     user: Mapped["User"] = relationship()
 
 
+class LoginOtp(Base):
+    """Codigo OTP de un solo uso para el 2do factor del login por email. Mismo
+    principio que PasswordResetToken: en DB vive SOLO el HMAC del codigo; el codigo
+    plano (6 digitos) viaja por email. Single-use (`used_at`), de vida corta
+    (`expires_at`) y con tope de `attempts` (el codigo numerico es de baja entropia,
+    asi que se invalida tras pocos intentos fallidos)."""
+
+    __tablename__ = "login_otps"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship()
+
+
 class ExportWindow(Base):
     """Ventana rolling de 24h del limite de exportaciones por usuario (Free Tier).
 
