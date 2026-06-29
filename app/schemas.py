@@ -44,6 +44,29 @@ class UserOut(BaseModel):
     is_admin: bool
 
 
+class LoginResponse(BaseModel):
+    """Respuesta del paso 1 del login. Dos casos segun `OTP_ENABLED`:
+    - OTP ON:  `otp_required=True`, `user=None` -> falta verificar el codigo por email.
+    - OTP OFF: `otp_required=False`, `user=<UserOut>` -> la sesion ya quedo iniciada
+      (cookie seteada), igual que el login de un solo paso."""
+
+    otp_required: bool = True
+    user: UserOut | None = None
+
+
+class VerifyOtpIn(BaseModel):
+    """Verificacion del codigo OTP recibido por email (2do paso del login)."""
+
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+
+
+class ResendOtpIn(BaseModel):
+    """Reenvio del codigo OTP (boton "reenviar" de la pantalla de verificacion)."""
+
+    email: EmailStr
+
+
 # --- Gestion de usuarios (panel admin) ---
 
 

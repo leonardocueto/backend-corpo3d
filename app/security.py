@@ -30,6 +30,12 @@ def hash_token(token: str) -> str:
     ).hexdigest()
 
 
+def generate_otp() -> str:
+    # Codigo OTP de 6 digitos (con zero-pad). Valor PLANO; en DB se guarda su HMAC
+    # (hash_token). secrets.randbelow => uniforme y criptograficamente seguro.
+    return f"{secrets.randbelow(10**6):06d}"
+
+
 # Alias historicos de la sesion (mismo mecanismo). El token de reset de password
 # usa generate_token / hash_token directamente.
 def generate_session_token() -> str:
