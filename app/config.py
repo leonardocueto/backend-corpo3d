@@ -54,8 +54,8 @@ class Settings(BaseSettings):
     mp_access_token: str | None = None
     mp_webhook_secret: str | None = None
     backend_url: str = "http://localhost:8000"
-    price_mensual: int = 10000
-    price_anual: int = 100000
+    price_mensual: int = 15000
+    price_anual: int = 150000
     currency_id: str = "ARS"
 
     # Login con Google (OAuth 2.0 / OIDC). El Client ID es PUBLICO (sirve para
