@@ -9,7 +9,7 @@ services:
     name: backend-corpo3d
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: free
+    plan: starter
     healthCheckPath: /health
     envVars:
       - key: ENVIRONMENT
