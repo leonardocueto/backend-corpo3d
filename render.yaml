@@ -44,6 +44,13 @@ services:
       # mano). El front necesita el MISMO valor en NUXT_PUBLIC_GOOGLE_CLIENT_ID.
       - key: GOOGLE_CLIENT_ID
         sync: false
+      # Guard de origen: secreto que Cloudflare inyecta como header x-origin-secret
+      # (Transform Rule) en api.corpolab3d.com. El backend rechaza (403) todo request
+      # que no lo traiga -> cierra el acceso directo a *.onrender.com. Si esta VACIA,
+      # el guard queda DESACTIVADO (fail-open). Cargar el MISMO valor de 64 hex que
+      # la Transform Rule. Rollout: deployar sin esto -> verificar -> recien cargarla.
+      - key: ORIGIN_SECRET
+        sync: false
       # Cloudflare R2 (disenos guardados; bucket privado). Secretos: a mano.
       - key: R2_ACCOUNT_ID
         sync: false
