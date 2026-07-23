@@ -15,9 +15,9 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: COOKIE_SAMESITE
-        # Vercel (front) y Render (api) son dominios distintos = cross-site:
-        # con "none" la cookie de sesion viaja (y fuerza Secure).
-        value: none
+        # Front (www.corpolab3d.com) y api (api.corpolab3d.com) comparten dominio
+        # registrable = same-site: "lax" alcanza (Secure lo fuerza ENVIRONMENT=production).
+        value: lax
       - key: SESSION_DAYS
         value: "7"
       - key: SESSION_SECRET
@@ -26,12 +26,12 @@ services:
         # Neon: postgresql+psycopg://USER:PASS@HOST.neon.tech/DB?sslmode=require
         sync: false
       - key: CORS_ORIGINS
-        # JSON array con el origen exacto del front: ["https://<app>.vercel.app"]
+        # JSON array con el origen exacto del front: ["https://www.corpolab3d.com"]
         sync: false
       - key: RESET_TOKEN_MINUTES
         value: "10"
       - key: FRONTEND_URL
-        # URL del front en Vercel (base del link del email): https://<app>.vercel.app
+        # URL del front (base del link del email): https://www.corpolab3d.com
         sync: false
       - key: EMAIL_FROM
         # Remitente. Prueba: "CorpoLab 3D <onboarding@resend.dev>" (solo envia al
