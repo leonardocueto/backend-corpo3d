@@ -156,7 +156,9 @@ El front debe llamar a la API con `credentials: "include"` para enviar/recibir l
   `google_sub`/`auth_provider`) pero no está activo end-to-end: el front no ofrece SSO y sin
   `GOOGLE_CLIENT_ID` el endpoint responde 401. Queda como base para el día que se active
   (ver flujo de auth #6). Todos los users hoy son `auth_provider='password'`.
-- **Guard de origen: activación en Render pendiente.** El código está deployado inactivo
-  (fail-open sin `ORIGIN_SECRET`). Para prenderlo: cargar `ORIGIN_SECRET` en el dashboard de
-  Render (mismo valor de 64 hex que la Transform Rule de Cloudflare) → reinicia y se activa.
-  Verificar luego: login desde www ok · `/health` directo = 200 · `/auth/me` directo = 403.
+- **Guard de origen: ACTIVO en prod** (2026-07-23). `ORIGIN_SECRET` cargada en Render;
+  verificado: `/health` directo = 200 · `/auth/me` directo (onrender.com) = 403 · `/auth/me`
+  por Cloudflare (api.corpolab3d.com) = 401 (guard transparente para el tráfico legítimo).
+- **Pendiente: prueba de pago sandbox de MercadoPago.** Correr un pago de prueba en el sandbox
+  de MP y confirmar que el webhook (`api.corpolab3d.com/payments/webhook`) llega, valida su
+  firma HMAC y acredita el tier. Es la última de las 4 verificaciones del rollout que falta.
