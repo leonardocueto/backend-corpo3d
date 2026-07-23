@@ -48,7 +48,8 @@ API en `http://localhost:8000` · Swagger en `/docs` · ReDoc en `/redoc`.
 ```
 backend/
 ├── app/
-│   ├── main.py            # FastAPI + CORSMiddleware + include router + /health
+│   ├── main.py            # FastAPI + guard de origen + CORSMiddleware + include router + /health
+│   ├── origin_guard.py    # middleware ASGI: exige header x-origin-secret (Cloudflare) o 403
 │   ├── config.py          # Settings (pydantic-settings); cookie_secure es property
 │   ├── database.py        # engine sync, SessionLocal, Base (DeclarativeBase), get_db
 │   ├── models.py          # User, Session (typed; UUID; created_at/revoked_at)
@@ -70,7 +71,8 @@ backend/
   usuarios creados por Google no tienen password), `is_active`, `is_admin`, `google_sub`
   (**único, nullable**: `sub` estable de la cuenta de Google para linkeo), `auth_provider`
   (`'password' | 'google'`, default `'password'`), `created_at`. (Columnas de Google: migración
-  `0007_google_oauth`.)
+  `0007_google_oauth`; **latentes**, hoy todos los users son `auth_provider='password'` — el login
+  con Google no esta activo, ver flujo de auth #6.)
 - **Session**: `id` (UUID), `user_id` (FK, `ON DELETE CASCADE`), `token_hash` (único),
   `expires_at`, `created_at`, `revoked_at` (nullable). Borrar un User borra sus sesiones.
 
@@ -91,12 +93,16 @@ backend/
 5. `POST /auth/signup`: alta **self-serve PÚBLICA** (sin admin). Crea siempre usuario común
    (`is_admin=False`) en tier free e inicia sesión al toque (misma cookie que `login`). No
    acepta `is_admin`/`tier` del cliente (anti-escalada). Rate limit 5/min.
-6. `POST /auth/google`: login con **Google (OIDC)**. El front manda el ID token (`credential`);
-   el backend lo verifica (`app/google_oauth.py`, firma + `aud` == `GOOGLE_CLIENT_ID` + `exp` +
-   `email_verified`). Busca por `google_sub`, si no por email (linkea cuentas password del mismo
-   email), si no **autocrea** (tier free, `password_hash=None`, `auth_provider='google'`). Termina
-   con la **misma cookie** que `login`. Sin `GOOGLE_CLIENT_ID` cargado responde 401. Google solo
-   verifica identidad: la fuente de verdad sigue siendo `users` en Postgres.
+6. `POST /auth/google`: login con **Google (OIDC)** — **NO IMPLEMENTADO / LATENTE**. El
+   codigo del backend ya existe (`app/google_oauth.py`, endpoint, migracion `0007`, columnas
+   `google_sub`/`auth_provider`) pero **no esta activo end-to-end**: el front no tiene boton de
+   Google (las pantallas de auth deliberadamente no ofrecen SSO) y sin `GOOGLE_CLIENT_ID` cargado
+   el endpoint responde 401. Queda como base para el dia que se active. Comportamiento previsto
+   cuando se implemente: el front manda el ID token (`credential`); el backend lo verifica (firma +
+   `aud` == `GOOGLE_CLIENT_ID` + `exp` + `email_verified`), busca por `google_sub`, si no por email
+   (linkea cuentas password del mismo email), si no **autocrea** (tier free, `password_hash=None`,
+   `auth_provider='google'`), y termina con la **misma cookie** que `login`. La fuente de verdad
+   sigue siendo `users` en Postgres.
 
 ## Seguridad — invariantes a NO romper
 
@@ -107,6 +113,15 @@ backend/
 - CORS: `allow_credentials=True` + `allow_origins` con dominios **exactos** (nunca `*`; el
   navegador lo rechaza con credenciales). Configurable por `CORS_ORIGINS` en `.env`.
 - `Secure` se activa solo en prod (`ENVIRONMENT=production`) o si `SameSite=none`.
+- **Guard de origen** (`origin_guard.py`): en prod el backend solo contesta a requests
+  que traen el header `x-origin-secret` que inyecta Cloudflare (Transform Rule en
+  `api.corpolab3d.com`); si no coincide con `ORIGIN_SECRET` → **403**. Cierra el acceso
+  directo a `*.onrender.com`. **Fail-open**: sin `ORIGIN_SECRET` seteada el middleware ni
+  se registra (dev/local anda sin el header) y se loguea un warning al arranque. Se registra
+  **antes** que `CORSMiddleware` a propósito → CORS queda outermost y un 403 sale con headers
+  CORS. **`/health` está exento** (el health check de Render pega directo, sin Cloudflare).
+  NO validar `CF-Ray`: Render mete todo `*.onrender.com` detrás de su propio Cloudflare, así
+  que ese header aparece por las dos puertas; el único discriminador es `x-origin-secret`.
 
 ## Despliegue / SameSite
 
@@ -136,3 +151,12 @@ El front debe llamar a la API con `credentials: "include"` para enviar/recibir l
   (10/min); limiter en `app/ratelimit.py`. Requiere uvicorn con `--proxy-headers`
   (ya en `start.sh`) para tomar la IP real detrás del proxy. En memoria (1 instancia);
   para multi-instancia haría falta Redis.
+- **Login con Google (OIDC): NO implementado / LATENTE.** El código del backend ya existe
+  (`app/google_oauth.py`, endpoint `/auth/google`, migración `0007`, columnas
+  `google_sub`/`auth_provider`) pero no está activo end-to-end: el front no ofrece SSO y sin
+  `GOOGLE_CLIENT_ID` el endpoint responde 401. Queda como base para el día que se active
+  (ver flujo de auth #6). Todos los users hoy son `auth_provider='password'`.
+- **Guard de origen: activación en Render pendiente.** El código está deployado inactivo
+  (fail-open sin `ORIGIN_SECRET`). Para prenderlo: cargar `ORIGIN_SECRET` en el dashboard de
+  Render (mismo valor de 64 hex que la Transform Rule de Cloudflare) → reinicia y se activa.
+  Verificar luego: login desde www ok · `/health` directo = 200 · `/auth/me` directo = 403.

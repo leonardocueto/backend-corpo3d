@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # el endpoint /auth/google responde 503 (la app arranca igual).
     google_client_id: str | None = None
 
+    # Guard de origen: el backend solo contesta a requests que pasaron por
+    # Cloudflare (api.corpolab3d.com), que inyecta el header `x-origin-secret`.
+    # Cierra el acceso directo a *.onrender.com (que saltea todas las reglas WAF).
+    # FAIL-OPEN A PROPOSITO: si falta (dev/local, o se pierde en prod), el guard
+    # queda DESACTIVADO y se loguea un warning al arranque (ver app/main.py).
+    origin_secret: str | None = None
+
     # CORS. Acepta JSON (["https://a","https://b"]) o lista separada por comas
     # (https://a,https://b). NoDecode desactiva el parseo JSON automatico de
     # pydantic-settings para que el validator de abajo maneje ambos formatos.

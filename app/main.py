@@ -1,11 +1,16 @@
-from fastapi import FastAPI, Request
+import logging
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
+from app.origin_guard import OriginGuardMiddleware
 from app.ratelimit import limiter
 from app.routers import auth, designs, exports, payments, tiers, users
+
+logger = logging.getLogger("app.main")
 
 app = FastAPI(title="Dashboard API")
 
@@ -13,6 +18,16 @@ app = FastAPI(title="Dashboard API")
 # por endpoint se declaran con @limiter.limit(...) en los routers.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Guard de origen: solo se activa si ORIGIN_SECRET esta seteada (FAIL-OPEN
+# deliberado para dev/local y para el rollout: se deploya inactivo y se prende
+# cargando la var en Render). OJO al orden: add_middleware ANTEPONE, o sea el
+# ULTIMO agregado queda outermost. Registramos el guard ANTES que CORS para que
+# CORS quede outermost y envuelva al guard -> un 403 sale con headers CORS.
+if settings.origin_secret:
+    app.add_middleware(OriginGuardMiddleware, secret=settings.origin_secret)
+else:
+    logger.warning("ORIGIN_SECRET ausente: guard de origen DESACTIVADO")
 
 # CORS para cookies: NO se puede usar "*" junto con allow_credentials=True.
 app.add_middleware(
@@ -35,23 +50,3 @@ app.include_router(payments.router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-# === TEMPORAL / DESECHABLE — verificacion "puerta Cloudflare" (BORRAR tras confirmar) ===
-# Cloudflare inyecta el header `x-origin-secret` en cada request que proxea. Este
-# endpoint NO compara nada: solo espeja lo que llega, para confirmar que el header
-# entra por una puerta y no por la otra. Pegarle a las dos:
-#   curl https://api.corpolab3d.com/__debug/origin          -> header_present: true
-#   curl https://backend-corpo3d.onrender.com/__debug/origin -> header_present: false
-# `via_cloudflare` es un doble-check: CF-Ray tambien lo agrega solo Cloudflare.
-@app.get("/__debug/origin")
-def _debug_origin(request: Request):
-    raw = request.headers.get("x-origin-secret")
-    preview = f"{raw[:4]}...{raw[-4:]}" if raw and len(raw) >= 8 else raw
-    return {
-        "header_present": raw is not None,
-        "value_preview": preview,
-        "value_len": len(raw) if raw else 0,
-        "via_cloudflare": "cf-ray" in request.headers,
-        "cf_ray": request.headers.get("cf-ray"),
-    }
