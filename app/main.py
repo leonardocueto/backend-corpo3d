@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -50,19 +50,3 @@ app.include_router(payments.router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-# === TEMPORAL / DESECHABLE — medir que IP ve el backend detras de 2 Cloudflares (BORRAR) ===
-# El trafico cruza TU Cloudflare y el de Render. Queremos saber si CF-Connecting-IP
-# llega con el IP real del visitante o pisado por el 2do Cloudflare. Espeja todos los
-# candidatos de una. Comparar cf_connecting_ip contra api.corpolab3d.com/cdn-cgi/trace.
-@app.get("/__debug/ip")
-def _debug_ip(request: Request):
-    return {
-        "cf_connecting_ip": request.headers.get("cf-connecting-ip"),
-        "true_client_ip": request.headers.get("true-client-ip"),
-        "x_origin_client_ip": request.headers.get("x-origin-client-ip"),
-        "x_forwarded_for": request.headers.get("x-forwarded-for"),
-        "x_real_ip": request.headers.get("x-real-ip"),
-        "client_host": request.client.host if request.client else None,
-    }

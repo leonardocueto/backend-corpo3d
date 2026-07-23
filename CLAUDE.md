@@ -147,10 +147,18 @@ El front debe llamar a la API con `credentials: "include"` para enviar/recibir l
 - Conectar el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`,
   capa de servicio con `credentials: "include"` y el fetching nativo de Nuxt 4).
 - Limpieza de sesiones vencidas (job periódico o `DELETE` en login).
-- Rate limiting (hecho): `slowapi` por IP en `/auth/login` (5/min) y `/auth/register`
-  (10/min); limiter en `app/ratelimit.py`. Requiere uvicorn con `--proxy-headers`
-  (ya en `start.sh`) para tomar la IP real detrás del proxy. En memoria (1 instancia);
-  para multi-instancia haría falta Redis.
+- Rate limiting (hecho): `slowapi` por IP en 16 endpoints (`auth.py` login/register/signup/
+  OTP/reset, `designs.py` list/write/open/thumb/save/delete); limiter en `app/ratelimit.py`.
+  **Keyeado por `CF-Connecting-IP`** (no por `get_remote_address` a secas): detrás de
+  Cloudflare, uvicorn toma el primer valor de `X-Forwarded-For`, que Cloudflare **appendea**
+  (no reescribe) → un atacante que manda su propio `X-Forwarded-For` controla ese valor y
+  saltea el límite. `CF-Connecting-IP` Cloudflare lo **sobrescribe siempre** (no spoofable);
+  con fallback a `get_remote_address` en dev local. Verificado en prod (2026-07-23) que el
+  header sobrevive intacto los **dos** Cloudflares de la cadena (el tuyo + el de Render). En
+  memoria (1 instancia); para multi-instancia haría falta Redis. Complemento recomendado (no
+  hecho): rate-limit rule en el borde de Cloudflare para `/auth/login` (ahorra uptime de
+  Render bloqueando el flood antes de llegar al backend; el limiter del origen no ahorra
+  minutos, el request ya llegó).
 - **Login con Google (OIDC): NO implementado / LATENTE.** El código del backend ya existe
   (`app/google_oauth.py`, endpoint `/auth/google`, migración `0007`, columnas
   `google_sub`/`auth_provider`) pero no está activo end-to-end: el front no ofrece SSO y sin
