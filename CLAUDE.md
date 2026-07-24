@@ -149,6 +149,19 @@ Render (`sync: false`).
   CORS. **`/health` está exento** (el health check de Render pega directo, sin Cloudflare).
   NO validar `CF-Ray`: Render mete todo `*.onrender.com` detrás de su propio Cloudflare, así
   que ese header aparece por las dos puertas; el único discriminador es `x-origin-secret`.
+- **Anti-bot / captcha — decisión (2026-07-24): NO se usa reCAPTCHA.** Las capas actuales
+  alcanzan: **OTP por email** en login (2FA; brute-force de la password no sirve), **rate
+  limiting** slowapi por `CF-Connecting-IP` (no spoofable) en los 16 endpoints, y **Cloudflare**
+  (rate-limit 5/10s en `/auth/login` + Managed Challenge + `not cf.client.bot`).
+  `forgot-password`/`resend-otp` devuelven 204 (no enumeran cuentas). **Gatillo para agregar
+  captcha**: abuso real en los endpoints que **mandan emails** (`forgot-password`/`resend-otp`
+  → mail-bombing a una víctima o quemar la cuota de Resend), donde el rate limit **por IP** no
+  frena una botnet distribuida. En ese caso usar **Cloudflare Turnstile en modo INVISIBLE** (NO
+  Google reCAPTCHA: ya estás en Cloudflare, es gratis y privacy-friendly; y el front prohíbe
+  campos visibles extra en las pantallas de auth, ver `3D/CLAUDE.md`) y **validar el token en el
+  backend** (un captcha solo en el front es bypasseable; el guard de origen NO protege endpoints
+  públicos de forja). Hueco conocido: el Managed Challenge de Cloudflare está acotado a **fuera
+  de LATAM** → no desafía bots locales (AR/LATAM).
 
 ## Despliegue / SameSite
 
