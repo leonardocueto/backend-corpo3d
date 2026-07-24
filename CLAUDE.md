@@ -56,7 +56,8 @@ backend/
 │   ├── schemas.py         # LoginIn, RegisterIn, UserOut (salida = {id,email,full_name,is_admin})
 │   ├── security.py        # hash_password/verify (bcrypt) · generate/hash_session_token (HMAC)
 │   ├── deps.py            # get_current_user (valida la sesión) · require_admin
-│   └── routers/auth.py    # /auth/login /me /logout /register + _set_session_cookie
+│   ├── ratelimit.py       # slowapi Limiter (key_func = CF-Connecting-IP, no spoofable)
+│   └── routers/           # auth.py + users/tiers/designs/exports/payments (MercadoPago)
 ├── scripts/create_admin.py# bootstrap del primer admin (CLI, valida formato de email)
 ├── alembic/               # env.py + versions/0001_initial.py (schema users+sessions)
 ├── docker-compose.yml · Dockerfile · .dockerignore
@@ -104,6 +105,32 @@ backend/
    `auth_provider='google'`), y termina con la **misma cookie** que `login`. La fuente de verdad
    sigue siendo `users` en Postgres.
 
+## Pagos (MercadoPago — Checkout Pro)
+
+`app/routers/payments.py`. Integración **Checkout Pro** (NO Checkout API): `sdk.preference()
+.create(...)` → devuelve `init_point`, el front redirige a la página de MP.
+
+- **Anti-tamper**: el cliente manda solo `{ plan }`; el **monto lo fija el servidor** (precios
+  en `config`). `GET /plans` expone los precios (la UI los lee de ahí, nada hardcodeado).
+- **El tier se activa SOLO desde el webhook con firma validada** (`POST /payments/webhook`),
+  nunca desde el redirect del navegador (`back_urls` es spoofeable). Idempotente por
+  `Payment.mp_payment_id` UNIQUE (MP reintenta el webhook).
+- **Firma del webhook** (`_valid_signature`): HMAC-SHA256 con `MP_WEBHOOK_SECRET`. Manifest
+  `id:<data.id>;request-id:<x-request-id>;ts:<ts>;`. Sin secret o firma que no matchea → **401**.
+- **`notification_url`** = `{BACKEND_URL}/payments/webhook` = `api.corpolab3d.com/...` → pasa
+  por Cloudflare (trae `x-origin-secret`, pasa el guard) y la **Custom rule 1 (Skip)** de
+  Cloudflare lo exime de todo el WAF.
+
+**Estado (2026-07-24): PROBADO, sin activar producción.** La firma funciona — la **"Simular
+notificación"** del panel de MP da **200**. Pero los pagos de PRUEBA daban **401**: es un
+**artefacto del sandbox de MP**, no un bug. Motivo: los pagos con "Credenciales de prueba" los
+cobra una **cuenta test auto-generada** (≈`3483540259`) que MP firma con **otro** secreto,
+distinto al del webhook de tu cuenta real (≈`257561078`, el `0f2fbd41…`). Hay **un solo
+secreto por app** (igual en Modo prueba y productivo). **En producción validará** (el cobrador
+será tu cuenta real, dueña del secreto). Se decidió **Camino B**: confiar en lo probado y
+verificar al activar producción. `MP_ACCESS_TOKEN` y `MP_WEBHOOK_SECRET` se cargan a mano en
+Render (`sync: false`).
+
 ## Seguridad — invariantes a NO romper
 
 - El token plano vive **solo** en la cookie `HttpOnly`. En DB nunca el token plano, solo su
@@ -122,6 +149,19 @@ backend/
   CORS. **`/health` está exento** (el health check de Render pega directo, sin Cloudflare).
   NO validar `CF-Ray`: Render mete todo `*.onrender.com` detrás de su propio Cloudflare, así
   que ese header aparece por las dos puertas; el único discriminador es `x-origin-secret`.
+- **Anti-bot / captcha — decisión (2026-07-24): NO se usa reCAPTCHA.** Las capas actuales
+  alcanzan: **OTP por email** en login (2FA; brute-force de la password no sirve), **rate
+  limiting** slowapi por `CF-Connecting-IP` (no spoofable) en los 16 endpoints, y **Cloudflare**
+  (rate-limit 5/10s en `/auth/login` + Managed Challenge + `not cf.client.bot`).
+  `forgot-password`/`resend-otp` devuelven 204 (no enumeran cuentas). **Gatillo para agregar
+  captcha**: abuso real en los endpoints que **mandan emails** (`forgot-password`/`resend-otp`
+  → mail-bombing a una víctima o quemar la cuota de Resend), donde el rate limit **por IP** no
+  frena una botnet distribuida. En ese caso usar **Cloudflare Turnstile en modo INVISIBLE** (NO
+  Google reCAPTCHA: ya estás en Cloudflare, es gratis y privacy-friendly; y el front prohíbe
+  campos visibles extra en las pantallas de auth, ver `3D/CLAUDE.md`) y **validar el token en el
+  backend** (un captcha solo en el front es bypasseable; el guard de origen NO protege endpoints
+  públicos de forja). Hueco conocido: el Managed Challenge de Cloudflare está acotado a **fuera
+  de LATAM** → no desafía bots locales (AR/LATAM).
 
 ## Despliegue / SameSite
 
@@ -132,6 +172,68 @@ backend/
   + `CORS_ORIGINS` con el origen exacto, todo HTTPS.
 
 El front debe llamar a la API con `credentials: "include"` para enviar/recibir la cookie.
+
+## Producción (Cloudflare + Vercel + Render + Neon)
+
+Topología: visitante → **Cloudflare** (DNS + proxy + WAF) → **Vercel** (front `www.corpolab3d.com`)
+/ **Render** (backend `api.corpolab3d.com`). DB en **Neon** (solo accesible por `DATABASE_URL`
+desde Render). Cookie **host-only** (`COOKIE_DOMAIN` ausente a propósito), `COOKIE_SAMESITE=lax`
+(www y api son same-site).
+
+- **Render deploya desde `main`, NO desde `dev`.** `dev` = staging; se promueve con el workflow
+  **manual** de GitHub Actions **"Promote dev to main"** (Actions → Run workflow): corre CI sobre
+  `dev` (compila + importa la app) y si pasa mergea `dev`→`main` y pushea (dispara el CD de
+  Render). **No promover a mano** (un commit local se cuela a main). `promote.yml` vive **solo en
+  `main`** (rama default) para que aparezca el botón.
+- **Cloudflare WAF (plan Free)** — reglas activas (2026-07-24):
+  - Custom rule 1 (Skip): `/.well-known/` + `/payments/webhook` → saltea todo el WAF (protege la
+    renovación del cert y el webhook de MP).
+  - Custom rule "Admin solo Argentina" (Block): `/admin` o `/ingresar` con `ip.src.country ne "AR"`.
+  - Custom rule "Challenge fuera de LATAM" (Managed Challenge): acotada a `http.host eq
+    "www.corpolab3d.com"` (NO api, o rompería los fetch del front con challenge) y `not cf.client.bot`.
+  - Rate limiting rule (0/1 del Free): `/auth/login` POST, 5/10s → Block (borde).
+  - Transform Rule: inyecta `x-origin-secret` en `api.corpolab3d.com` (el guard de origen).
+  - Cupos: custom 3/5 · rate-limiting 1/1 · transform 1/10.
+
+## Correo del dominio (corpolab3d.com)
+
+Setup hecho el **2026-07-24**. Dos piezas **separadas** que conviven sin pisarse (recibir usa
+**MX en la raiz**; enviar usa **TXT + MX en el subdominio `send`**).
+
+**Recepcion** → **Cloudflare Email Routing** (gratis en todos los planes; solo **reenvia**, no da
+casilla propia). **HECHO y probado** (llegan los mails):
+- `info@corpolab3d.com` y `support@corpolab3d.com` → reenvian a `leocueto1999@gmail.com`.
+- **Catch-all activo** → misma bandeja (cubre typos: `suport@`, `ifno@`, etc.).
+- El "Email Sending" nativo de Cloudflare NO se usa (Beta + exige plan Workers Pago).
+
+**Envio (app)** → **Resend** (ya integrado en `app/email.py`: reset password + OTP). Dominio
+`corpolab3d.com` **verificado**. Sender **`no-reply@corpolab3d.com`** via `EMAIL_FROM` (default
+igual en `app/config.py`; en prod manda la env de Render).
+
+**Responder como info@/support@** → Gmail "Enviar como" via **SMTP de Resend**
+(`smtp.resend.com:465`, user `resend`, pass = API key de Resend).
+
+Registros DNS en Cloudflare (todos **DNS-only** / nube gris; MX y TXT ni se proxean):
+
+| Origen | Type | Name | Value (resumen) |
+| --- | --- | --- | --- |
+| Email Routing | MX ×3 | `corpolab3d.com` (raiz) | `route1/2/3.mx.cloudflare.net` |
+| Email Routing | TXT (SPF) | `corpolab3d.com` (raiz) | `v=spf1 include:_spf.mx.cloudflare.net ~all` |
+| Email Routing | TXT (DKIM) | `cf2024-1._domainkey` | firma del reenvio |
+| Resend | TXT (DKIM) | `resend._domainkey` | `p=MIG...` |
+| Resend | MX | `send` | `feedback-smtp...amazonses.com` (prio 10) |
+| Resend | TXT (SPF) | `send` | `v=spf1 include:amazonses.com ~all` |
+| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=none;` |
+
+> **No pisar el SPF de la raiz** (Email Routing): el SPF de Resend vive en el subdominio `send`,
+> no en la raiz. Con el dominio verificado en Resend ya **no hay bloqueo tecnico para activar el
+> OTP de login** (`OTP_ENABLED`); esa activacion queda como decision aparte. DMARC arranca en
+> `p=none` (monitoreo) y se endurece luego. El WAF no interviene (el mail va por MX/SMTP, no HTTP).
+
+**Estado (2026-07-24):** recepcion (info/support/catch-all) **probada OK**. Dominio en Resend
+**verificado**. `EMAIL_FROM` agregada en Render (redeploy) → falta **verificar el 1er envio real**
+(un `forgot-password` debe salir `From: no-reply@corpolab3d.com`, `dkim/spf/dmarc=pass`). Gmail
+"Enviar como" para info@/support@ **pendiente** (Parte D).
 
 ## Convenciones / cuidados
 
@@ -155,10 +257,10 @@ El front debe llamar a la API con `credentials: "include"` para enviar/recibir l
   saltea el límite. `CF-Connecting-IP` Cloudflare lo **sobrescribe siempre** (no spoofable);
   con fallback a `get_remote_address` en dev local. Verificado en prod (2026-07-23) que el
   header sobrevive intacto los **dos** Cloudflares de la cadena (el tuyo + el de Render). En
-  memoria (1 instancia); para multi-instancia haría falta Redis. Complemento recomendado (no
-  hecho): rate-limit rule en el borde de Cloudflare para `/auth/login` (ahorra uptime de
-  Render bloqueando el flood antes de llegar al backend; el limiter del origen no ahorra
-  minutos, el request ya llegó).
+  memoria (1 instancia); para multi-instancia haría falta Redis. Complemento en el **borde
+  (HECHO 2026-07-24)**: Rate limiting rule de Cloudflare 5/10s en `/auth/login` (es Rate
+  limiting rule, NO custom rule; con Block plano bloquearías TODOS los logins). Verificado:
+  el backend corta al 6º request (429 slowapi), Cloudflare al 7º (429 error 1015, en el borde).
 - **Login con Google (OIDC): NO implementado / LATENTE.** El código del backend ya existe
   (`app/google_oauth.py`, endpoint `/auth/google`, migración `0007`, columnas
   `google_sub`/`auth_provider`) pero no está activo end-to-end: el front no ofrece SSO y sin
@@ -167,6 +269,8 @@ El front debe llamar a la API con `credentials: "include"` para enviar/recibir l
 - **Guard de origen: ACTIVO en prod** (2026-07-23). `ORIGIN_SECRET` cargada en Render;
   verificado: `/health` directo = 200 · `/auth/me` directo (onrender.com) = 403 · `/auth/me`
   por Cloudflare (api.corpolab3d.com) = 401 (guard transparente para el tráfico legítimo).
-- **Pendiente: prueba de pago sandbox de MercadoPago.** Correr un pago de prueba en el sandbox
-  de MP y confirmar que el webhook (`api.corpolab3d.com/payments/webhook`) llega, valida su
-  firma HMAC y acredita el tier. Es la última de las 4 verificaciones del rollout que falta.
+- **Pagos MercadoPago (Checkout Pro): webhook PROBADO, falta activar producción.** Ver la
+  sección "Pagos (MercadoPago)". La firma HMAC del webhook quedó verificada (la simulación
+  desde el panel de MP da 200). El día que se lance: activar Credenciales de producción en MP,
+  cambiar `MP_ACCESS_TOKEN` al de producción, rotar `MP_WEBHOOK_SECRET` (se filtró en debug) y
+  probar un pago real chico.

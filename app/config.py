@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"  # base del link del email
     reset_token_minutes: int = 10                # vida del token de reset
     resend_api_key: str | None = None            # si falta, en dev se loguea el link
-    email_from: str = "CorpoLab 3D <onboarding@resend.dev>"
+    email_from: str = "CorpoLab 3D <no-reply@corpolab3d.com>"  # dominio verificado en Resend
 
     # OTP de login (2do factor por email). El codigo de 6 digitos vive poco y
     # admite pocos intentos (baja entropia: 1M de combinaciones).
