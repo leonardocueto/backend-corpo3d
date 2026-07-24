@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # deployar el codigo y prender el OTP solo cuando el envio de emails este listo
     # (dominio verificado en Resend, etc.).
     otp_enabled: bool = False
-    otp_minutes: int = 5                          # vida del codigo OTP
+    otp_minutes: int = 3                          # vida del codigo OTP (y cooldown de reenvio)
     otp_max_attempts: int = 5                     # intentos de verificacion antes de invalidar
 
     # Cloudflare R2 (storage de disenos guardados; bucket PRIVADO, S3-compatible).

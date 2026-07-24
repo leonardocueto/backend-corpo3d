@@ -9,6 +9,8 @@ pydantic-settings>=2.4
 pydantic[email]>=2.9
 slowapi>=0.1.9
 httpx>=0.27
+# Templates de emails transaccionales (app/mailing): header/footer + extends/include.
+jinja2>=3.1
 boto3>=1.34
 mercadopago>=2.2
 # Login con Google (OIDC): verifica el ID token. El extra [requests] trae el
