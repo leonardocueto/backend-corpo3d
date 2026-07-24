@@ -91,9 +91,25 @@ backend/
 4. `POST /auth/register`: `Depends(require_admin)` → solo un admin autenticado crea usuarios.
    El primer admin se crea con `scripts/create_admin.py` (huevo-gallina). El alta admin con
    tier vive además en `POST /users` (router admin-only), que es el que usa el panel.
-5. `POST /auth/signup`: alta **self-serve PÚBLICA** (sin admin). Crea siempre usuario común
-   (`is_admin=False`) en tier free e inicia sesión al toque (misma cookie que `login`). No
-   acepta `is_admin`/`tier` del cliente (anti-escalada). Rate limit 5/min.
+5. `POST /auth/signup`: alta **self-serve PÚBLICA** (sin admin) con **verificación de email
+   (double opt-in)**. **NO crea el usuario ni inicia sesión**: guarda un `PendingRegistration`
+   (email + `full_name` + password ya hasheado + token) y manda por email un link
+   `{FRONTEND_URL}/confirmar-registro?token=...` (envío en BackgroundTask). Responde **202**
+   (sin body, sin cookie). Casos: si el email ya tiene cuenta **confirmada** → **409 "Email ya
+   registrado"**; si hay un pendiente sin confirmar → se **invalida y se emite uno nuevo** (un
+   solo link vivo a la vez, patrón de `forgot-password`). No acepta `is_admin`/`tier`
+   (anti-escalada). Rate limit 5/min. Vida del token: `SIGNUP_TOKEN_MINUTES` (default 60).
+   - **`PendingRegistration`** (`models.py`, migración `0009`): espejo de `PasswordResetToken`
+     pero **sin FK a `users`** (el usuario aún no existe). En DB solo el HMAC del token; `email`
+     indexado NO único (se reusa tras confirmar/expirar). Se eligió tabla aparte (no `User`
+     inactivo) para no ensuciar `users` ni bloquear el `unique(email)` con altas sin confirmar.
+5b. `POST /auth/verify-signup`: 2do paso del double opt-in. Consume el token (single-use +
+   corto; 400 genérico si no existe/usado/vencido) y **recién ahí crea el `User` real**
+   (`is_admin=False`, tier free lazy, `password_hash` copiado del pending **sin re-hashear**).
+   **NO inicia sesión** (no cookie): el usuario debe **ingresar de nuevo** (igual que
+   `reset-password`). Idempotente: si la cuenta ya existe (doble click / carrera), marca el
+   pending usado y devuelve el user existente. Email en `app/email.py`
+   (`send_signup_verification_email`; sin `RESEND_API_KEY` loguea el link en dev).
 6. `POST /auth/google`: login con **Google (OIDC)** — **NO IMPLEMENTADO / LATENTE**. El
    codigo del backend ya existe (`app/google_oauth.py`, endpoint, migracion `0007`, columnas
    `google_sub`/`auth_provider`) pero **no esta activo end-to-end**: el front no tiene boton de
@@ -104,6 +120,20 @@ backend/
    (linkea cuentas password del mismo email), si no **autocrea** (tier free, `password_hash=None`,
    `auth_provider='google'`), y termina con la **misma cookie** que `login`. La fuente de verdad
    sigue siendo `users` en Postgres.
+7. **OTP de login (2do factor por email)** — código listo, se prende con `OTP_ENABLED=true`
+   (default `false`; sin bloqueo técnico desde que el dominio quedó verificado en Resend). Con
+   OTP ON el login es de **2 pasos**: `POST /auth/login` valida credenciales y, en vez de setear
+   cookie, emite un código de 6 dígitos por email y responde `otp_required=true`;
+   `POST /auth/verify-otp` consume el código y **recién ahí** inicia sesión (misma cookie). Con
+   OTP OFF el login es de 1 paso como siempre. Modelo `LoginOtp` (migración `0008`): HMAC del
+   código, single-use (`used_at`), corto (`OTP_MINUTES`, default **3**), tope `OTP_MAX_ATTEMPTS`
+   (default 5).
+   - **`POST /auth/resend-otp`** (botón "reenviar"): responde **SIEMPRE 204** (anti-enumeración).
+     **Cooldown server-side**: NO emite un código nuevo mientras el usuario tenga uno **activo**
+     (sin usar y sin vencer) — es la validación real del timer del front (que solo habilita
+     "reenviar" al vencer el código), no salteable manipulando el cliente. Al vencer el código
+     actual, el reenvío vuelve a estar disponible. (Además hay rate-limit slowapi 1/min por IP,
+     que el cooldown de 3 min ya subsume.)
 
 ## Pagos (MercadoPago — Checkout Pro)
 
