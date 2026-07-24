@@ -296,7 +296,25 @@ OTP = template con tema viejo).
   `str.replace`). Mantener la capa aislada (`app/email.py`).
 - Conectar el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`,
   capa de servicio con `credentials: "include"` y el fetching nativo de Nuxt 4).
-- Limpieza de sesiones vencidas (job periódico o `DELETE` en login).
+- Limpieza de filas vencidas (job periódico o `DELETE` de paso en login/signup): aplica a
+  `sessions`, `password_reset_tokens`, `login_otps` y `pending_registrations` (todas guardan
+  `expires_at`). Se resuelve con un `DELETE ... WHERE expires_at < now()`; **NO** justifica traer
+  Redis (ver la nota de Redis).
+- **Redis — cuándo SÍ, cuándo NO (decisión 2026-07-24, a futuro):** hoy **no se usa** y no hace
+  falta (single-instance, "pocos usuarios internos"). Todo el estado efímero (sesiones, tokens de
+  reset, OTP, pending registrations) vive en **Postgres a propósito**, por la **atomicidad
+  transaccional** (ej. `verify-signup` crea el `User` y marca el pending usado en una sola
+  transacción; con Redis se partiría en dos datastores y se perdería). Distinguir los dos roles de
+  Redis para no mezclarlos:
+  - **Store efímero / rate-limit distribuido** → el gatillo real es correr **múltiples instancias**
+    del backend: ahí el `slowapi` en memoria (1 instancia) deja de servir y Redis pasa a ser
+    necesario para el rate-limit compartido (y opcionalmente sesiones/tokens, asumiendo el
+    trade-off de atomicidad). Mientras sea 1 instancia, no aporta.
+  - **Caché** → solo para respuestas **dinámicas del backend, caras y compartidas** (ej.
+    `GET /plans`, agregados). **NO** para la landing ni contenido estático: la landing es una **SPA
+    estática** servida por **CDN (Vercel) + Cloudflare** en el borde — eso ya es más rápido y
+    barato que Redis. Para público estático/casi-estático, cachear en **Cloudflare/CDN
+    (`Cache-Control`)**, no en Redis.
 - Rate limiting (hecho): `slowapi` por IP en 16 endpoints (`auth.py` login/register/signup/
   OTP/reset, `designs.py` list/write/open/thumb/save/delete); limiter en `app/ratelimit.py`.
   **Keyeado por `CF-Connecting-IP`** (no por `get_remote_address` a secas): detrás de
