@@ -15,9 +15,13 @@ from sqlalchemy.orm import Session as DbSession
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_admin
-from app.email import send_login_otp_email, send_password_reset_email
+from app.email import (
+    send_login_otp_email,
+    send_password_reset_email,
+    send_signup_verification_email,
+)
 from app.google_oauth import GoogleAuthError, verify_google_id_token
-from app.models import LoginOtp, PasswordResetToken, Session, User
+from app.models import LoginOtp, PasswordResetToken, PendingRegistration, Session, User
 from app.ratelimit import limiter
 from app.routers.tiers import sync_user_tier
 from app.schemas import (
@@ -32,6 +36,7 @@ from app.schemas import (
     SignupIn,
     UserOut,
     VerifyOtpIn,
+    VerifySignupIn,
 )
 from app.security import (
     generate_otp,
@@ -306,43 +311,94 @@ def register(request: Request, payload: RegisterIn, db: DbSession = Depends(get_
     return user
 
 
-@router.post("/signup", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit("5/minute")
 def signup(
     request: Request,
     payload: SignupIn,
-    response: Response,
+    background: BackgroundTasks,
     db: DbSession = Depends(get_db),
 ):
-    """Alta self-serve (PUBLICA, sin admin). Crea SIEMPRE un usuario comun
-    (`is_admin=False`) en tier free (sin fila en `user_tiers`: free es lazy) e
-    inicia sesion al toque (cookie HttpOnly), igual que `login`. El front recibe
-    el user y la cookie en una sola llamada."""
+    """Alta self-serve (PUBLICA, sin admin) con verificacion de email (double
+    opt-in). NO crea el usuario ni inicia sesion: guarda un `PendingRegistration`
+    (email + full_name + password ya hasheado + token) y manda un link por email.
+    La cuenta se crea RECIEN al consumir el token en `/auth/verify-signup`; ahi el
+    usuario tiene que ingresar de nuevo (no hay auto-login).
+
+    - Si el email ya tiene cuenta CONFIRMADA -> 409 (mismo comportamiento de antes).
+    - Si hay un pendiente sin confirmar -> se invalida y se emite uno nuevo (un solo
+      link vivo a la vez), asi se puede reintentar si el primer mail no llego."""
     if db.scalar(select(User).where(User.email == payload.email)):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Email ya registrado")
-    user = User(
-        email=payload.email,
-        full_name=payload.full_name,
-        password_hash=hash_password(payload.password),
-        is_admin=False,  # forzado: el endpoint publico nunca crea admins
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
 
-    # Auto-login: misma cola de sesion que `login` (token plano solo en la cookie,
-    # en DB solo su HMAC). Un usuario nuevo no tiene tier que sincronizar.
-    token = generate_session_token()
+    # Invalida los pendientes previos sin usar de este email (un link vivo a la vez).
+    db.execute(
+        update(PendingRegistration)
+        .where(
+            PendingRegistration.email == payload.email,
+            PendingRegistration.used_at.is_(None),
+        )
+        .values(used_at=datetime.now(timezone.utc))
+    )
+    token = generate_token()
     db.add(
-        Session(
-            user_id=user.id,
-            token_hash=hash_session_token(token),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.session_days),
+        PendingRegistration(
+            email=payload.email,
+            full_name=payload.full_name,
+            password_hash=hash_password(payload.password),
+            token_hash=hash_token(token),
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=settings.signup_token_minutes),
         )
     )
     db.commit()
+    link = f"{settings.frontend_url.rstrip('/')}/confirmar-registro?token={token}"
+    # Envio en background: la respuesta no espera al proveedor.
+    background.add_task(send_signup_verification_email, payload.email, link)
 
-    _set_session_cookie(response, token)
+
+@router.post("/verify-signup", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
+def verify_signup(
+    request: Request,
+    payload: VerifySignupIn,
+    db: DbSession = Depends(get_db),
+):
+    """Confirma el alta (2do paso del double opt-in): consume el token del email y
+    crea el usuario real. Token single-use + corto. NO inicia sesion: el usuario
+    tiene que ingresar despues (igual que /reset-password)."""
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token invalido o expirado")
+
+    pending = db.scalar(
+        select(PendingRegistration).where(
+            PendingRegistration.token_hash == hash_token(payload.token)
+        )
+    )
+    if (
+        pending is None
+        or pending.used_at is not None
+        or pending.expires_at <= datetime.now(timezone.utc)
+    ):
+        raise invalid
+
+    # Consumimos el token pase lo que pase (single-use).
+    pending.used_at = datetime.now(timezone.utc)
+
+    # Guard de carrera / doble click: si la cuenta ya existe, no duplicamos; devolvemos
+    # el usuario existente (idempotente).
+    user = db.scalar(select(User).where(User.email == pending.email))
+    if user is None:
+        user = User(
+            email=pending.email,
+            full_name=pending.full_name,
+            # Ya viene hasheado del signup: NO re-hashear.
+            password_hash=pending.password_hash,
+            is_admin=False,  # forzado: el alta publica nunca crea admins
+        )
+        db.add(user)
+
+    db.commit()
+    db.refresh(user)
     return user
 
 

@@ -78,6 +78,31 @@ class PasswordResetToken(Base):
     user: Mapped["User"] = relationship()
 
 
+class PendingRegistration(Base):
+    """Alta self-serve a la espera de confirmar el email (double opt-in). Mismo
+    principio que PasswordResetToken: en DB vive SOLO el HMAC del token; el valor
+    plano viaja por email al usuario. La CUENTA todavia no existe: aca se guardan
+    los datos del alta (email + full_name + password ya hasheado) y recien se crea
+    el `User` real cuando se consume el token en `/auth/verify-signup`.
+
+    `email` va indexado pero NO unico: se reusa tras confirmar/expirar, y un nuevo
+    signup invalida los pendientes previos del mismo email (un solo link vivo a la
+    vez). Single-use (`used_at`) y de vida corta (`expires_at`)."""
+
+    __tablename__ = "pending_registrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    full_name: Mapped[str | None] = mapped_column(String(255))
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class LoginOtp(Base):
     """Codigo OTP de un solo uso para el 2do factor del login por email. Mismo
     principio que PasswordResetToken: en DB vive SOLO el HMAC del codigo; el codigo
