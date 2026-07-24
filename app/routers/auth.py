@@ -184,10 +184,25 @@ def resend_otp(
     db: DbSession = Depends(get_db),
 ):
     """Reenvia un OTP nuevo (boton "reenviar" de la pantalla de verificacion).
-    Responde SIEMPRE 204, exista o no el email (anti-enumeracion)."""
+    Responde SIEMPRE 204, exista o no el email (anti-enumeracion).
+
+    Cooldown server-side: NO reenvia si el usuario todavia tiene un codigo ACTIVO
+    (sin usar y sin vencer). Es la validacion real del timer del front (que solo
+    habilita "reenviar" cuando el codigo vence); no se puede saltear manipulando el
+    cliente. Al vencer el codigo actual, el reenvio vuelve a estar disponible."""
     user = db.scalar(select(User).where(User.email == payload.email))
-    if user is not None and user.is_active:
-        _issue_login_otp(db, user, background)
+    if user is None or not user.is_active:
+        return
+    active = db.scalar(
+        select(LoginOtp).where(
+            LoginOtp.user_id == user.id,
+            LoginOtp.used_at.is_(None),
+            LoginOtp.expires_at > datetime.now(timezone.utc),
+        )
+    )
+    if active is not None:
+        return  # 204: hay un codigo vivo, hay que esperar a que venza
+    _issue_login_otp(db, user, background)
 
 
 @router.post("/google", response_model=UserOut)
