@@ -64,6 +64,40 @@ def send_password_reset_email(to_email: str, reset_link: str) -> None:
         logger.error("Fallo enviando reset email a %s: %s", to_email, exc)
 
 
+def send_signup_verification_email(to_email: str, verify_link: str) -> None:
+    """Manda el link de confirmacion de alta (double opt-in). Mismo patron que el
+    reset: sin `RESEND_API_KEY` (dev) LOGUEA el link y vuelve; nunca levanta (corre
+    en BackgroundTask). La cuenta se crea recien cuando el usuario abre este link."""
+    if not settings.resend_api_key:
+        # Dev / sin proveedor: dejamos el link en los logs para probar el flujo.
+        logger.warning("[DEV] Signup verification link para %s: %s", to_email, verify_link)
+        return
+
+    html = (
+        f'<p>Gracias por registrarte en CorpoLab 3D.</p>'
+        f'<p>Confirma tu cuenta para terminar de crearla:</p>'
+        f'<p><a href="{verify_link}">Confirmar mi cuenta</a></p>'
+        f'<p>El enlace vence en {settings.signup_token_minutes} minutos. '
+        f'Si no fuiste vos, ignora este mensaje.</p>'
+    )
+    try:
+        resp = httpx.post(
+            RESEND_ENDPOINT,
+            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+            json={
+                "from": settings.email_from,
+                "to": [to_email],
+                "subject": "Confirma tu cuenta - CorpoLab 3D",
+                "html": html,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        # No re-lanzamos: el endpoint responde igual (anti-enumeracion / anti-timing).
+        logger.error("Fallo enviando verification email a %s: %s", to_email, exc)
+
+
 def send_login_otp_email(to_email: str, code: str) -> None:
     """Manda el codigo OTP del 2do factor de login. Mismo patron que el reset:
     sin `RESEND_API_KEY` (dev) LOGUEA el codigo y vuelve; nunca levanta (corre en

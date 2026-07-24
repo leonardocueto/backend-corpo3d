@@ -27,6 +27,13 @@ class SignupIn(BaseModel):
     full_name: str | None = None
 
 
+class VerifySignupIn(BaseModel):
+    """Confirmacion del alta (double opt-in): consume el token del email y crea la
+    cuenta real. Espejo del `token` de ResetPasswordIn."""
+
+    token: str
+
+
 class GoogleAuthIn(BaseModel):
     """Login con Google. `credential` es el ID token (JWT) que devuelve Google
     Identity Services en el front. Se verifica SOLO en el backend (firma + aud +

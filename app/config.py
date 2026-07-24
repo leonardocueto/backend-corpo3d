@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Recuperacion de contraseña (forgot/reset)
     frontend_url: str = "http://localhost:3000"  # base del link del email
     reset_token_minutes: int = 10                # vida del token de reset
+    signup_token_minutes: int = 60               # vida del link de verificacion de alta (double opt-in)
     resend_api_key: str | None = None            # si falta, en dev se loguea el link
     email_from: str = "CorpoLab 3D <no-reply@corpolab3d.com>"  # dominio verificado en Resend
 
