@@ -230,10 +230,12 @@ Registros DNS en Cloudflare (todos **DNS-only** / nube gris; MX y TXT ni se prox
 > OTP de login** (`OTP_ENABLED`); esa activacion queda como decision aparte. DMARC arranca en
 > `p=none` (monitoreo) y se endurece luego. El WAF no interviene (el mail va por MX/SMTP, no HTTP).
 
-**Estado (2026-07-24):** recepcion (info/support/catch-all) **probada OK**. Dominio en Resend
-**verificado**. `EMAIL_FROM` agregada en Render (redeploy) → falta **verificar el 1er envio real**
-(un `forgot-password` debe salir `From: no-reply@corpolab3d.com`, `dkim/spf/dmarc=pass`). Gmail
-"Enviar como" para info@/support@ **pendiente** (Parte D).
+**Estado (2026-07-24):** recepcion (info/support/soporte/contacto/ventas + catch-all APAGADO →
+las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMAIL_FROM` en Render
+= `no-reply@corpolab3d.com`. **Envio real VERIFICADO**: un `forgot-password` de prod llego
+`From: no-reply@corpolab3d.com` con **SPF+DKIM+DMARC = PASS**. Frontend actualizado: landing y
+paginas legales apuntan a `contacto@corpolab3d.com` (rama `fix/contacto-emails` mergeada a `dev`).
+Gmail "Enviar como" para responder desde info@/support@ **pendiente** (Parte D).
 
 ## Convenciones / cuidados
 
