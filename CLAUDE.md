@@ -235,7 +235,9 @@ las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMA
 = `no-reply@corpolab3d.com`. **Envio real VERIFICADO**: un `forgot-password` de prod llego
 `From: no-reply@corpolab3d.com` con **SPF+DKIM+DMARC = PASS**. Frontend actualizado: landing y
 paginas legales apuntan a `contacto@corpolab3d.com` (rama `fix/contacto-emails` mergeada a `dev`).
-Gmail "Enviar como" para responder desde info@/support@ **pendiente** (Parte D).
+**Pendientes** (ver "TODO / pendiente"): Gmail "Enviar como" para responder desde los alias, y
+**rediseñar los estilos/formato** de los mails transaccionales (hoy reset = HTML inline crudo;
+OTP = template con tema viejo).
 
 ## Convenciones / cuidados
 
@@ -248,6 +250,20 @@ Gmail "Enviar como" para responder desde info@/support@ **pendiente** (Parte D).
 
 ## TODO / pendiente
 
+- **Correo — Gmail "Enviar como" (Parte D del setup de correo): PENDIENTE.** Configurar en Gmail
+  el "Enviar como" para **responder** desde `info@`/`support@`/`contacto@` (que el cliente vea la
+  respuesta desde la direccion de la empresa, no desde el Gmail personal). Datos del SMTP de
+  Resend: servidor `smtp.resend.com`, puerto `465` (SSL), usuario `resend`, contraseña = una
+  **API key de Resend** (conviene una dedicada, ej. `gmail-smtp`, para poder revocarla sola). El
+  codigo de confirmacion de Gmail llega solo porque esos alias ya reenvian al Gmail (Parte A).
+  Repetir por cada direccion. Recepcion + envio ya funcionan; esto es solo para responder-como.
+- **Correo — rediseñar estilos/formato de los mails transaccionales: PENDIENTE.** Hoy el mail de
+  **reset password** es HTML **inline crudo** en `app/email.py` (sin marca) y el **OTP** usa
+  `app/templates/otp.html` (con tema viejo **teal/oscuro**; la marca ya migro a tema **claro** —
+  ver `3D/CLAUDE.md`). Unificar a un template branded coherente (tema claro CorpoLab, logo,
+  tipografia, boton), email-safe (tablas + estilos inline), y mover el HTML del reset a su propio
+  template en `app/templates/` (mismo patron que `otp.html`, con placeholders sustituidos por
+  `str.replace`). Mantener la capa aislada (`app/email.py`).
 - Conectar el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`,
   capa de servicio con `credentials: "include"` y el fetching nativo de Nuxt 4).
 - Limpieza de sesiones vencidas (job periódico o `DELETE` en login).
