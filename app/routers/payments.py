@@ -56,17 +56,7 @@ def _valid_signature(
     `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` (data.id en minusculas).
     Sin secret configurado o firma que no matchea -> False (se rechaza con 401)."""
     secret = settings.mp_webhook_secret
-    # === DEBUG TEMPORAL (BORRAR) — diagnostica por que la firma da 401 ===
-    logger.warning(
-        "WEBHOOK DEBUG: secret_set=%s secret_len=%s x_signature=%r x_request_id=%r data_id=%r",
-        bool(secret),
-        len(secret) if secret else 0,
-        x_signature,
-        x_request_id,
-        data_id,
-    )
     if not secret or not x_signature or not data_id:
-        logger.warning("WEBHOOK DEBUG: corta temprano (falta secret/x_signature/data_id)")
         return False
     parts = dict(
         p.strip().split("=", 1) for p in x_signature.split(",") if "=" in p
@@ -74,21 +64,12 @@ def _valid_signature(
     ts = parts.get("ts")
     v1 = parts.get("v1")
     if not ts or not v1:
-        logger.warning("WEBHOOK DEBUG: sin ts/v1 en x_signature; parts=%r", parts)
         return False
     manifest = f"id:{data_id.lower()};request-id:{x_request_id or ''};ts:{ts};"
     expected = hmac.new(
         secret.encode("utf-8"), manifest.encode("utf-8"), hashlib.sha256
     ).hexdigest()
-    ok = hmac.compare_digest(expected, v1)
-    logger.warning(
-        "WEBHOOK DEBUG: manifest=%r v1_recibido=%s expected=%s match=%s",
-        manifest,
-        v1,
-        expected,
-        ok,
-    )
-    return ok
+    return hmac.compare_digest(expected, v1)
 
 
 # --- Schemas ---
