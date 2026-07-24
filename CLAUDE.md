@@ -195,6 +195,46 @@ desde Render). Cookie **host-only** (`COOKIE_DOMAIN` ausente a propósito), `COO
   - Transform Rule: inyecta `x-origin-secret` en `api.corpolab3d.com` (el guard de origen).
   - Cupos: custom 3/5 · rate-limiting 1/1 · transform 1/10.
 
+## Correo del dominio (corpolab3d.com)
+
+Setup hecho el **2026-07-24**. Dos piezas **separadas** que conviven sin pisarse (recibir usa
+**MX en la raiz**; enviar usa **TXT + MX en el subdominio `send`**).
+
+**Recepcion** → **Cloudflare Email Routing** (gratis en todos los planes; solo **reenvia**, no da
+casilla propia). **HECHO y probado** (llegan los mails):
+- `info@corpolab3d.com` y `support@corpolab3d.com` → reenvian a `leocueto1999@gmail.com`.
+- **Catch-all activo** → misma bandeja (cubre typos: `suport@`, `ifno@`, etc.).
+- El "Email Sending" nativo de Cloudflare NO se usa (Beta + exige plan Workers Pago).
+
+**Envio (app)** → **Resend** (ya integrado en `app/email.py`: reset password + OTP). Dominio
+`corpolab3d.com` **verificado**. Sender **`no-reply@corpolab3d.com`** via `EMAIL_FROM` (default
+igual en `app/config.py`; en prod manda la env de Render).
+
+**Responder como info@/support@** → Gmail "Enviar como" via **SMTP de Resend**
+(`smtp.resend.com:465`, user `resend`, pass = API key de Resend).
+
+Registros DNS en Cloudflare (todos **DNS-only** / nube gris; MX y TXT ni se proxean):
+
+| Origen | Type | Name | Value (resumen) |
+| --- | --- | --- | --- |
+| Email Routing | MX ×3 | `corpolab3d.com` (raiz) | `route1/2/3.mx.cloudflare.net` |
+| Email Routing | TXT (SPF) | `corpolab3d.com` (raiz) | `v=spf1 include:_spf.mx.cloudflare.net ~all` |
+| Email Routing | TXT (DKIM) | `cf2024-1._domainkey` | firma del reenvio |
+| Resend | TXT (DKIM) | `resend._domainkey` | `p=MIG...` |
+| Resend | MX | `send` | `feedback-smtp...amazonses.com` (prio 10) |
+| Resend | TXT (SPF) | `send` | `v=spf1 include:amazonses.com ~all` |
+| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=none;` |
+
+> **No pisar el SPF de la raiz** (Email Routing): el SPF de Resend vive en el subdominio `send`,
+> no en la raiz. Con el dominio verificado en Resend ya **no hay bloqueo tecnico para activar el
+> OTP de login** (`OTP_ENABLED`); esa activacion queda como decision aparte. DMARC arranca en
+> `p=none` (monitoreo) y se endurece luego. El WAF no interviene (el mail va por MX/SMTP, no HTTP).
+
+**Estado (2026-07-24):** recepcion (info/support/catch-all) **probada OK**. Dominio en Resend
+**verificado**. `EMAIL_FROM` agregada en Render (redeploy) → falta **verificar el 1er envio real**
+(un `forgot-password` debe salir `From: no-reply@corpolab3d.com`, `dkim/spf/dmarc=pass`). Gmail
+"Enviar como" para info@/support@ **pendiente** (Parte D).
+
 ## Convenciones / cuidados
 
 - **Respuestas al usuario (chat)**: español SIN tildes/acentos (ej. "Confirmas"). Solo el chat,
