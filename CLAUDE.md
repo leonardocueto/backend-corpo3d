@@ -265,9 +265,9 @@ las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMA
 = `no-reply@corpolab3d.com`. **Envio real VERIFICADO**: un `forgot-password` de prod llego
 `From: no-reply@corpolab3d.com` con **SPF+DKIM+DMARC = PASS**. Frontend actualizado: landing y
 paginas legales apuntan a `contacto@corpolab3d.com` (rama `fix/contacto-emails` mergeada a `dev`).
-**Pendientes** (ver "TODO / pendiente"): Gmail "Enviar como" para responder desde los alias, y
-**rediseñar los estilos/formato** de los mails transaccionales (hoy reset = HTML inline crudo;
-OTP = template con tema viejo).
+**Pendiente** (ver "TODO / pendiente"): Gmail "Enviar como" para responder desde los alias. Los
+templates branded de los mails (header/footer + tema claro, Jinja2 en `app/mailing/`) ya están
+**HECHOS** (2026-07-24); falta solo la verificación visual en Gmail/Outlook post-deploy de los PNG.
 
 ## Convenciones / cuidados
 
@@ -287,13 +287,19 @@ OTP = template con tema viejo).
   **API key de Resend** (conviene una dedicada, ej. `gmail-smtp`, para poder revocarla sola). El
   codigo de confirmacion de Gmail llega solo porque esos alias ya reenvian al Gmail (Parte A).
   Repetir por cada direccion. Recepcion + envio ya funcionan; esto es solo para responder-como.
-- **Correo — rediseñar estilos/formato de los mails transaccionales: PENDIENTE.** Hoy el mail de
-  **reset password** es HTML **inline crudo** en `app/email.py` (sin marca) y el **OTP** usa
-  `app/templates/otp.html` (con tema viejo **teal/oscuro**; la marca ya migro a tema **claro** —
-  ver `3D/CLAUDE.md`). Unificar a un template branded coherente (tema claro CorpoLab, logo,
-  tipografia, boton), email-safe (tablas + estilos inline), y mover el HTML del reset a su propio
-  template en `app/templates/` (mismo patron que `otp.html`, con placeholders sustituidos por
-  `str.replace`). Mantener la capa aislada (`app/email.py`).
+- **Correo — templates branded de los mails transaccionales: HECHO (2026-07-24).** Sistema de
+  templates en **`app/mailing/`** con **Jinja2** (dep `jinja2` en ambos requirements). Estructura:
+  `render.py` (`render_email(template, **ctx)`, autoescape ON, inyecta `assets_base_url` +
+  `support_email`) + `templates/` con `base.html` (card centrada, tema **claro** CorpoLab) que
+  incluye `header.html` (logo-texto arriba-izq) y `footer.html` (logo-completo abajo-izq +
+  "¿Necesitas ayuda?" + `info@corpolab3d.com`); cada mail **extiende** `base.html`:
+  `reset_password.html`, `signup_verification.html`, `login_otp.html`. `app/email.py` ahora
+  **renderiza con Jinja2** (helper `_send` a Resend; se eliminó el HTML inline y el `str.replace`;
+  se borró `app/templates/otp.html`). **Logos**: los mails apuntan al **CDN del front**
+  (`{FRONTEND_URL}/logo/logo-texto.png` y `logo-completo.png`, PNG servidos por Vercel/Cloudflare;
+  se convirtieron de `.webp` porque varios clientes de email no renderizan webp). Copia fuente de
+  los PNG en `app/mailing/assets/`. **Pendiente visual**: verificar el render real en Gmail/Outlook
+  una vez deployados los PNG en `corpolab3d.com/logo/` (el front tiene que estar publicado).
 - Conectar el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`,
   capa de servicio con `credentials: "include"` y el fetching nativo de Nuxt 4).
 - Limpieza de filas vencidas (job periódico o `DELETE` de paso en login/signup): aplica a

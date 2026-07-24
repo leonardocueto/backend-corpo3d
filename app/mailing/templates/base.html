@@ -1,0 +1,35 @@
+{#
+  Layout base de los mails — CorpoLab 3D (tema claro).
+  HTML email-safe: layout con <table>, estilos INLINE. Incluye header (logo-texto) y
+  footer (logo-completo + soporte); cada mail extiende esto y llena {% block content %}.
+#}
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>{% block title %}CorpoLab 3D{% endblock %}</title>
+  </head>
+  <body style="margin:0; padding:0; background-color:#eff0f3; color:#1b1b1b; -webkit-font-smoothing:antialiased; font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <!-- preheader: texto de preview en la bandeja, oculto en el cuerpo -->
+    <div style="display:none; max-height:0; overflow:hidden; opacity:0; color:#eff0f3;">{% block preheader %}{% endblock %}</div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#eff0f3;">
+      <tr>
+        <td align="center" style="padding:32px 16px;">
+          <!-- card centrada -->
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px; background-color:#ffffff; border:1px solid #e5e5e8; border-radius:16px; overflow:hidden;">
+            {% include "header.html" %}
+            <tr>
+              <td style="padding:8px 36px 28px 36px;">
+                {% block content %}{% endblock %}
+              </td>
+            </tr>
+            {% include "footer.html" %}
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
