@@ -64,7 +64,7 @@ services:
   # Cron Job: aviso de vencimiento de tiers pagos. Reusa el MISMO Docker image que el
   # web; arranca 1 vez por dia, corre el script y termina. Idempotente (marca
   # expiry_warning_sent_at). "Trigger Run" en el dashboard lo ejecuta on-demand.
-  - type: cronjob
+  - type: cron
     name: cron-corpo3d-expiry
     runtime: docker
     dockerfilePath: ./Dockerfile

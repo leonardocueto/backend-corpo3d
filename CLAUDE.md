@@ -176,7 +176,7 @@ Render (`sync: false`).
 
 ## Jobs programados (Render Cron)
 
-Tareas que corren **fuera** del proceso web, en un **Cron Job de Render** (`type: cronjob` en
+Tareas que corren **fuera** del proceso web, en un **Cron Job de Render** (`type: cron` en
 `render.yaml`): reusa el **mismo Docker image**, arranca en horario, corre un comando y termina
 (no es un scheduler in-process; no toca el web). Se ejecutan on-demand con **"Trigger Run"** en
 el dashboard.
