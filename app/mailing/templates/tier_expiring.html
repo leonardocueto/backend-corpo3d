@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Tu plan está por vencer - CorpoLab 3D{% endblock %}
+{% block preheader %}Tu plan {{ plan_label }} vence el {{ expires_at }}. Renovalo para no perder las exportaciones ilimitadas.{% endblock %}
+{% block content %}
+<h1 style="margin:0 0 12px 0; font-size:23px; line-height:1.3; font-weight:700; color:#1b1b1b;">Tu plan está por vencer ⏳</h1>
+<p style="margin:0 0 22px 0; font-size:15px; line-height:1.6; color:#6b6b6b;">
+  Tu plan <strong>{{ plan_label }}</strong> vence el <strong>{{ expires_at }}</strong>. Cuando
+  venza, tu cuenta vuelve al plan gratuito y las exportaciones quedan limitadas de nuevo.
+</p>
+<p style="margin:0 0 24px 0; font-size:15px; line-height:1.6; color:#6b6b6b;">
+  Renovalo ahora para seguir con exportaciones ilimitadas, sin interrupciones.
+</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;">
+  <tr>
+    <td align="center" style="border-radius:10px; background-color:#4e5af2; background-image:linear-gradient(90deg,#4e5af2,#2f37ad);">
+      <a href="{{ renew_link }}"
+         style="display:inline-block; padding:13px 30px; font-size:15px; font-weight:600; color:#ffffff; text-decoration:none;">
+        Renovar mi plan
+      </a>
+    </td>
+  </tr>
+</table>
+<p style="margin:0; font-size:14px; line-height:1.6; color:#9a9a9a;">
+  Si ya renovaste, ignorá este mensaje.
+</p>
+{% endblock %}

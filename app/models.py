@@ -195,6 +195,12 @@ class UserTier(Base):
     tier: Mapped[str] = mapped_column(String(16), default="free", nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Marca de cuando se envio el aviso de "vence pronto" (job diario). Se estampa al
+    # avisar y se LIMPIA (=None) al renovar/pagar o cambiar el tier, para que el nuevo
+    # periodo vuelva a avisar. NULL = todavia no se aviso en el periodo vigente.
+    expiry_warning_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

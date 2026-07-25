@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import mercadopago
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session as DbSession
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user
+from app.email import send_payment_approved_email, send_payment_rejected_email
 from app.models import Payment, User
 from app.routers.tiers import PAID_TIERS, activate_paid_tier
 
@@ -155,11 +156,16 @@ def create_checkout(
 
 
 @router.post("/webhook")
-async def webhook(request: Request, db: DbSession = Depends(get_db)) -> dict:
+async def webhook(
+    request: Request,
+    background: BackgroundTasks,
+    db: DbSession = Depends(get_db),
+) -> dict:
     """Notificacion de Mercado Pago (publico, sin auth). Valida la firma SIEMPRE;
-    re-consulta el pago real a MP y, si esta aprobado, activa el tier + registra el
-    Payment en una sola transaccion. Idempotente (mp_payment_id UNIQUE). Responde
-    siempre 200 salvo firma invalida (401), para que MP no reintente en vano."""
+    re-consulta el pago real a MP. Si esta aprobado, activa el tier + registra el
+    Payment (y avisa por email); si fue rechazado/cancelado, registra el Payment
+    fallido + avisa por email. Idempotente (mp_payment_id UNIQUE). Responde siempre
+    200 salvo firma invalida (401), para que MP no reintente en vano."""
     data_id = request.query_params.get("data.id") or request.query_params.get("id")
 
     if not _valid_signature(
@@ -179,11 +185,16 @@ async def webhook(request: Request, db: DbSession = Depends(get_db)) -> dict:
     if result.get("status") != 200:
         return {"status": "ignored"}
     payment = result["response"]
-    if payment.get("status") != "approved":
+    mp_status = payment.get("status")
+
+    # Solo nos interesan estados TERMINALES: aprobado (activa tier) o rechazado/
+    # cancelado (avisa el fallo). pending/in_process -> sin accion (como antes).
+    if mp_status not in ("approved", "rejected", "cancelled"):
         return {"status": "ignored"}
 
     mp_payment_id = str(payment["id"])
-    # Idempotencia: si ya lo procesamos, cortamos sin re-activar ni duplicar.
+    # Idempotencia: si ya registramos este pago (aprobado o fallido), cortamos sin
+    # re-activar, re-insertar ni re-mailear (MP reintenta el webhook).
     if db.scalar(select(Payment).where(Payment.mp_payment_id == mp_payment_id)):
         return {"status": "ok"}
 
@@ -195,23 +206,61 @@ async def webhook(request: Request, db: DbSession = Depends(get_db)) -> dict:
         user_id = uuid.UUID(user_id_str)
     except ValueError:
         return {"status": "ignored"}
-    if db.get(User, user_id) is None:
+    user = db.get(User, user_id)
+    if user is None:
         return {"status": "ignored"}
 
-    now = datetime.now(timezone.utc)
-    activate_paid_tier(db, user_id, plan, now)
+    # Datos para el mail: los tomamos ANTES del commit (post-commit la sesion expira
+    # los atributos y forzaria un reload). El envio corre en BackgroundTask.
+    to_email = user.email
+    plan_label = "Mensual" if plan == "mensual" else "Anual"
+    amount = int(payment.get("transaction_amount") or 0)
+
+    if mp_status == "approved":
+        now = datetime.now(timezone.utc)
+        tier = activate_paid_tier(db, user_id, plan, now)
+        expires_str = tier.expires_at.strftime("%d/%m/%Y") if tier.expires_at else "-"
+        db.add(
+            Payment(
+                user_id=user_id,
+                plan=plan,
+                mp_payment_id=mp_payment_id,
+                status="approved",
+                amount=amount,
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            # Carrera: otra entrega del mismo webhook ya inserto el Payment (UNIQUE).
+            db.rollback()
+            return {"status": "ok"}
+        background.add_task(
+            send_payment_approved_email,
+            to_email,
+            plan_label,
+            f"{amount:,.0f}".replace(",", "."),
+            settings.currency_id,
+            expires_str,
+        )
+        return {"status": "ok"}
+
+    # Rechazado / cancelado: registramos el pago fallido (auditoria + idempotencia)
+    # y avisamos al usuario que puede reintentar. No se toca el tier.
     db.add(
         Payment(
             user_id=user_id,
             plan=plan,
             mp_payment_id=mp_payment_id,
-            status="approved",
-            amount=int(payment.get("transaction_amount") or 0),
+            status=mp_status,
+            amount=amount,
         )
     )
     try:
         db.commit()
     except IntegrityError:
-        # Carrera: otra entrega del mismo webhook ya inserto el Payment (UNIQUE).
         db.rollback()
+        return {"status": "ok"}
+    retry_link = f"{settings.frontend_url.rstrip('/')}/pricing"
+    background.add_task(send_payment_rejected_email, to_email, plan_label, retry_link)
     return {"status": "ok"}

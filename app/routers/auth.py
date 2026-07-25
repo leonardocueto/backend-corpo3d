@@ -19,6 +19,7 @@ from app.email import (
     send_login_otp_email,
     send_password_reset_email,
     send_signup_verification_email,
+    send_welcome_email,
 )
 from app.google_oauth import GoogleAuthError, verify_google_id_token
 from app.models import LoginOtp, PasswordResetToken, PendingRegistration, Session, User
@@ -377,6 +378,7 @@ def signup(
 def verify_signup(
     request: Request,
     payload: VerifySignupIn,
+    background: BackgroundTasks,
     db: DbSession = Depends(get_db),
 ):
     """Confirma el alta (2do paso del double opt-in): consume el token del email y
@@ -402,7 +404,8 @@ def verify_signup(
     # Guard de carrera / doble click: si la cuenta ya existe, no duplicamos; devolvemos
     # el usuario existente (idempotente).
     user = db.scalar(select(User).where(User.email == pending.email))
-    if user is None:
+    is_new = user is None
+    if is_new:
         user = User(
             email=pending.email,
             full_name=pending.full_name,
@@ -414,6 +417,10 @@ def verify_signup(
 
     db.commit()
     db.refresh(user)
+    # Bienvenida solo en el alta real (no en el caso idempotente de doble click), y
+    # despues del commit para no mandarla si la transaccion falla. En BackgroundTask.
+    if is_new:
+        background.add_task(send_welcome_email, user.email, user.full_name)
     return user
 
 

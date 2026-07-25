@@ -57,8 +57,11 @@ backend/
 │   ├── security.py        # hash_password/verify (bcrypt) · generate/hash_session_token (HMAC)
 │   ├── deps.py            # get_current_user (valida la sesión) · require_admin
 │   ├── ratelimit.py       # slowapi Limiter (key_func = CF-Connecting-IP, no spoofable)
+│   ├── email.py           # envio Resend (send_* transaccionales) — capa aislada del proveedor
+│   ├── mailing/           # templates Jinja2 branded (base+header+footer; render_email)
 │   └── routers/           # auth.py + users/tiers/designs/exports/payments (MercadoPago)
-├── scripts/create_admin.py# bootstrap del primer admin (CLI, valida formato de email)
+├── scripts/create_admin.py    # bootstrap del primer admin (CLI, valida formato de email)
+├── scripts/notify_expiring.py # job diario: aviso "vence pronto" de tiers pagos (Render Cron)
 ├── alembic/               # env.py + versions/0001_initial.py (schema users+sessions)
 ├── docker-compose.yml · Dockerfile · .dockerignore
 ├── requirements.txt          # dev local (psycopg[binary])
@@ -110,6 +113,10 @@ backend/
    `reset-password`). Idempotente: si la cuenta ya existe (doble click / carrera), marca el
    pending usado y devuelve el user existente. Email en `app/email.py`
    (`send_signup_verification_email`; sin `RESEND_API_KEY` loguea el link en dev).
+   - **Mail de bienvenida (2026-07-25)**: al crear el `User` real (solo en el alta nueva, NO en
+     el caso idempotente) se encola `send_welcome_email` en BackgroundTask, después del commit.
+     Solo aplica al signup público; las altas de admin (`/auth/register`, `POST /users`) no
+     mandan bienvenida.
 6. `POST /auth/google`: login con **Google (OIDC)** — **NO IMPLEMENTADO / LATENTE**. El
    codigo del backend ya existe (`app/google_oauth.py`, endpoint, migracion `0007`, columnas
    `google_sub`/`auth_provider`) pero **no esta activo end-to-end**: el front no tiene boton de
@@ -150,6 +157,12 @@ backend/
 - **`notification_url`** = `{BACKEND_URL}/payments/webhook` = `api.corpolab3d.com/...` → pasa
   por Cloudflare (trae `x-origin-secret`, pasa el guard) y la **Custom rule 1 (Skip)** de
   Cloudflare lo exime de todo el WAF.
+- **Mails de resultado (2026-07-25)**: el webhook maneja estados **terminales** y avisa por
+  email (en BackgroundTask): `approved` → activa tier + registra `Payment` + `send_payment_
+  approved_email`; `rejected`/`cancelled` → registra `Payment` con ese status (auditoría +
+  idempotencia) + `send_payment_rejected_email` (link "Reintentar" → `/pricing`). `pending`/
+  `in_process` → sin acción (como antes). Un solo mail por pago gracias al `mp_payment_id`
+  UNIQUE (los reintentos del webhook no re-mailean). El **tier NO se toca** en el fallo.
 
 **Estado (2026-07-24): PROBADO, sin activar producción.** La firma funciona — la **"Simular
 notificación"** del panel de MP da **200**. Pero los pagos de PRUEBA daban **401**: es un
@@ -160,6 +173,24 @@ secreto por app** (igual en Modo prueba y productivo). **En producción validar�
 será tu cuenta real, dueña del secreto). Se decidió **Camino B**: confiar en lo probado y
 verificar al activar producción. `MP_ACCESS_TOKEN` y `MP_WEBHOOK_SECRET` se cargan a mano en
 Render (`sync: false`).
+
+## Jobs programados (Render Cron)
+
+Tareas que corren **fuera** del proceso web, en un **Cron Job de Render** (`type: cronjob` en
+`render.yaml`): reusa el **mismo Docker image**, arranca en horario, corre un comando y termina
+(no es un scheduler in-process; no toca el web). Se ejecutan on-demand con **"Trigger Run"** en
+el dashboard.
+
+- **`scripts/notify_expiring.py`** — aviso de **vencimiento próximo** de tiers pagos. Cron
+  **diario** (`schedule: "0 12 * * *"` = 12:00 UTC ≈ 09:00 AR), comando
+  `python -m scripts.notify_expiring`. Busca tiers `mensual`/`anual` **vigentes** que vencen
+  dentro de `TIER_EXPIRY_WARNING_DAYS` (default **10**) y **sin aviso previo**
+  (`UserTier.expiry_warning_sent_at IS NULL`), manda `send_tier_expiring_email` (CTA → `/pricing`)
+  y estampa la marca. **Idempotente**: no reenvía al día siguiente. La marca se **limpia**
+  (`= None`) al renovar/pagar (`activate_paid_tier`) y al cambiar tier a free (`set_user_tier`),
+  así el nuevo período vuelve a avisar (migración `0010`). Flag **`--dry-run`** para listar sin
+  enviar ni estampar. **Costo**: el cron se factura aparte del web, solo por el tiempo que corre
+  (segundos/día → centavos); no consume ni reemplaza la instancia web.
 
 ## Seguridad — invariantes a NO romper
 
@@ -293,7 +324,9 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   `support_email`) + `templates/` con `base.html` (card centrada, tema **claro** CorpoLab) que
   incluye `header.html` (logo-texto arriba-izq) y `footer.html` (logo-completo abajo-izq +
   "¿Necesitas ayuda?" + `info@corpolab3d.com`); cada mail **extiende** `base.html`:
-  `reset_password.html`, `signup_verification.html`, `login_otp.html`. `app/email.py` ahora
+  `reset_password.html`, `signup_verification.html`, `login_otp.html` y (2026-07-25)
+  `welcome.html`, `payment_approved.html`, `payment_rejected.html`, `tier_expiring.html`.
+  `app/email.py` ahora
   **renderiza con Jinja2** (helper `_send` a Resend; se eliminó el HTML inline y el `str.replace`;
   se borró `app/templates/otp.html`). **Logos**: los mails apuntan al **CDN del front**
   (`{FRONTEND_URL}/logo/logo-texto.png` y `logo-completo.png`, PNG servidos por Vercel/Cloudflare;
@@ -305,7 +338,8 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
 - Limpieza de filas vencidas (job periódico o `DELETE` de paso en login/signup): aplica a
   `sessions`, `password_reset_tokens`, `login_otps` y `pending_registrations` (todas guardan
   `expires_at`). Se resuelve con un `DELETE ... WHERE expires_at < now()`; **NO** justifica traer
-  Redis (ver la nota de Redis).
+  Redis (ver la nota de Redis). Ya hay infra de **Cron Job de Render** (ver "Jobs programados") →
+  este cleanup puede colgarse ahí como otro script diario cuando se implemente.
 - **Redis — cuándo SÍ, cuándo NO (decisión 2026-07-24, a futuro):** hoy **no se usa** y no hace
   falta (single-instance, "pocos usuarios internos"). Todo el estado efímero (sesiones, tokens de
   reset, OTP, pending registrations) vive en **Postgres a propósito**, por la **atomicidad
@@ -346,3 +380,9 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   desde el panel de MP da 200). El día que se lance: activar Credenciales de producción en MP,
   cambiar `MP_ACCESS_TOKEN` al de producción, rotar `MP_WEBHOOK_SECRET` (se filtró en debug) y
   probar un pago real chico.
+- **Servir estáticos desde un bucket de estáticos: PENDIENTE (a futuro).** Mover los assets
+  estáticos a un **bucket de object storage** (ej. Cloudflare R2 / S3) servido por CDN, en vez
+  de servirlos desde el backend. Aplica a lo estático que hoy pueda estar saliendo por el
+  proceso FastAPI (ej. los PNG de logos de los mails en `app/mailing/assets/`, o cualquier
+  archivo público). Definir el bucket, el dominio/CDN que lo expone y actualizar las URLs
+  (`assets_base_url` / `FRONTEND_URL`) que apuntan a los assets.
