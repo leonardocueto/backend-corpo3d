@@ -192,6 +192,32 @@ el dashboard.
   enviar ni estampar. **Costo**: el cron se factura aparte del web, solo por el tiempo que corre
   (segundos/día → centavos); no consume ni reemplaza la instancia web.
 
+**Estado (2026-07-25): DESPLEGADO y PROBADO en prod.** Se promovió `dev`→`main`, el Blueprint
+creó el servicio **`cron-corpo3d-expiry`** y un **"Trigger Run"** manual dio
+`Avisos enviados: 0` + `finished successfully` (0 es OK: no había tiers venciendo en 10 días).
+Ya corre solo cada día a las 12:00 UTC.
+
+- **Env vars del cron = MANUALES.** Es un **servicio aparte**: las vars `sync: false` del bloque
+  cron (`DATABASE_URL`, `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`, `SESSION_SECRET`) **NO se
+  copian del web** — se cargan a mano en el dashboard del cron (Environment). Se copian **iguales**
+  a las del web, salvo `SESSION_SECRET` que puede ser **cualquier random** (el cron no valida
+  sesiones, pero `app/config.py` lo exige al importar o crashea). `ENVIRONMENT` y
+  `TIER_EXPIRY_WARNING_DAYS` van con `value:` fijo en el blueprint (no se tocan). **Si cambia
+  `DATABASE_URL`/`RESEND_API_KEY`, actualizar en los DOS servicios.** (Alternativa no usada:
+  `fromService` con `envVarKey` para heredarlas del web y no duplicar.)
+- **`type: cron`** (NO `cronjob`, que no es un tipo válido → el servicio no se crearía). Ver la
+  spec del blueprint de Render.
+
+**Facturación Render (aprendido 2026-07-25):** Render **NO** tiene un tope/alerta de **gasto
+total** ("avisame/cortá al llegar a $X"): esa feature no existe. El único control es el **spend
+limit del Build Pipeline** (Workspace Settings → Build Pipeline → Edit), que gobierna **solo
+minutos de build/pre-deploy**, no el hosting ni el runtime del cron. Starter build: **$5/1.000
+min, 500 min gratis/mes**. Está en **$0** a propósito → se usan los 500 gratis y, al agotarlos,
+**los builds se frenan** (no cobra de más; ~2-5 min por build → los 500 alcanzan de sobra). El
+hosting es suscripción fija (web Starter ~$7/mes) → gasto predecible, muy por debajo de $20. Un
+tope **duro real** sobre el total solo se logra del lado del **medio de pago** (tarjeta con
+límite).
+
 ## Seguridad — invariantes a NO romper
 
 - El token plano vive **solo** en la cookie `HttpOnly`. En DB nunca el token plano, solo su
