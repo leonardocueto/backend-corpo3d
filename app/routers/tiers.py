@@ -81,6 +81,9 @@ def activate_paid_tier(
     tier.tier = plan
     tier.paid_at = now
     tier.expires_at = expiry_for(plan, now)
+    # Nuevo periodo: rearmamos el aviso de vencimiento (el job volvera a avisar a los
+    # ~10 dias del nuevo expires_at).
+    tier.expiry_warning_sent_at = None
     return tier
 
 
@@ -130,6 +133,7 @@ def set_user_tier(
         tier.tier = "free"
         tier.paid_at = None
         tier.expires_at = None
+        tier.expiry_warning_sent_at = None
     else:
         tier = activate_paid_tier(db, user_id, payload.tier, now)
 

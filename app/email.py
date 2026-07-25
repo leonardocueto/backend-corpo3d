@@ -76,3 +76,67 @@ def send_login_otp_email(to_email: str, code: str) -> None:
         "login_otp.html", code=code, minutes=settings.otp_minutes, email=to_email
     )
     _send(to_email, "Tu codigo de acceso - CorpoLab 3D", html)
+
+
+def send_welcome_email(to_email: str, full_name: str | None) -> None:
+    """Bienvenida tras crear la cuenta (alta self-serve confirmada)."""
+    if not settings.resend_api_key:
+        # Dev / sin proveedor: dejamos constancia en los logs.
+        logger.warning("[DEV] Welcome email para %s", to_email)
+        return
+    # verify-signup NO inicia sesion: el CTA lleva al login.
+    html = render_email(
+        "welcome.html",
+        full_name=full_name,
+        app_link=f"{settings.frontend_url.rstrip('/')}/ingresar",
+    )
+    _send(to_email, "¡Bienvenido a CorpoLab 3D!", html)
+
+
+def send_payment_approved_email(
+    to_email: str, plan_label: str, amount: str, currency: str, expires_at: str
+) -> None:
+    """Confirma un pago aprobado (tier activado). El caller pasa el monto/vencimiento
+    ya formateados como texto (esta capa solo arma y envia)."""
+    if not settings.resend_api_key:
+        logger.warning("[DEV] Payment approved email para %s (%s)", to_email, plan_label)
+        return
+    html = render_email(
+        "payment_approved.html",
+        plan_label=plan_label,
+        amount=amount,
+        currency=currency,
+        expires_at=expires_at,
+        app_link=f"{settings.frontend_url.rstrip('/')}/editor",
+    )
+    _send(to_email, "Pago confirmado - CorpoLab 3D", html)
+
+
+def send_payment_rejected_email(
+    to_email: str, plan_label: str, retry_link: str
+) -> None:
+    """Avisa que un pago fue rechazado (no se realizo cargo). Incluye link para reintentar."""
+    if not settings.resend_api_key:
+        logger.warning("[DEV] Payment rejected email para %s (%s)", to_email, plan_label)
+        return
+    html = render_email(
+        "payment_rejected.html", plan_label=plan_label, retry_link=retry_link
+    )
+    _send(to_email, "No pudimos procesar tu pago - CorpoLab 3D", html)
+
+
+def send_tier_expiring_email(
+    to_email: str, plan_label: str, expires_at: str, renew_link: str
+) -> None:
+    """Aviso de vencimiento proximo del tier pago (job diario, ~10 dias antes). El
+    caller pasa la fecha ya formateada; esta capa solo arma y envia."""
+    if not settings.resend_api_key:
+        logger.warning("[DEV] Tier expiring email para %s (%s, vence %s)", to_email, plan_label, expires_at)
+        return
+    html = render_email(
+        "tier_expiring.html",
+        plan_label=plan_label,
+        expires_at=expires_at,
+        renew_link=renew_link,
+    )
+    _send(to_email, "Tu plan está por vencer - CorpoLab 3D", html)
