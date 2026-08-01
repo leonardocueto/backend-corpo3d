@@ -142,6 +142,39 @@ backend/
      actual, el reenvío vuelve a estar disponible. (Además hay rate-limit slowapi 1/min por IP,
      que el cooldown de 3 min ya subsume.)
 
+## Exportaciones — gate de descarga (`app/routers/exports.py`)
+
+**`POST /exports/download` es el punto de enforcement REAL de la descarga** (agregado el
+2026-07-31, rama `feature/export-download-gate`). Recibe por **multipart** los archivos que
+generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
+`cuerpo/pieza-1.stl`), más `structure_id` y `project_name`; valida server-side y devuelve el
+**ZIP armado acá** (`zipfile` en memoria).
+
+- **Por qué existe**: el ZIP se armaba 100% en el navegador y el backend solo se consultaba
+  (`POST /exports/attempts/use`) → llamada **cooperativa**. Con un *override* de la respuesta
+  de `GET /exports/attempts` (`unlimited: true`) el cliente se auto-habilitaba descargas
+  ilimitadas y estructuras premium. Ahora **la response ES el artefacto**: sin pasar la
+  validación no hay archivo, y un override de responses no puede fabricar el ZIP.
+- **Orden de validación** (importa): (1) `structure_id ∈ PREMIUM_STRUCTURE_IDS` y usuario no
+  ilimitado → **403 `detail="premium_structure"`** (detail distinguible para que el front abra
+  el modal de upsell y no el de "sin intentos"); (2) sanitización del payload (**antes** de
+  debitar, así un 4xx no consume intento): sin traversal ni paths absolutos, extensiones en
+  `ALLOWED_EXPORT_EXTENSIONS`, tope `MAX_EXPORT_FILES`/`MAX_EXPORT_BYTES`; (3) **filtro del
+  PDF** para cuentas free (la ficha técnica es feature paga); (4) free → `_consume_attempt`.
+- **`_consume_attempt(db, user_id, now)`**: extraído de `use_attempt`, descuenta bajo
+  `SELECT ... FOR UPDATE` **sin commitear** — el commit ocurre recién con el ZIP ya armado, así
+  el debit y la entrega son **atómicos** (si el armado falla, el rollback devuelve el intento;
+  antes, el intento se perdía si la generación explotaba en el cliente).
+- `PREMIUM_STRUCTURE_IDS` guarda **solo los IDs**: las definiciones geométricas se quedan en el
+  front a propósito, para que un Free pueda **previsualizar y editar** estructuras premium
+  (funnel de venta). Lo que se corta es la **descarga**, no el preview. Si se agrega una
+  estructura premium al catálogo del front, **agregar su id acá también**.
+- **Residuo aceptado**: los adapters STL/DXF viven en el bundle (los necesita el preview), así
+  que scripting activo en consola puede rearmar un ZIP local. Cubrimos el ataque por override
+  de responses, que es el realista.
+- `POST /exports/attempts/use` queda **DEPRECATED** (ver TODO): se mantiene mientras el front
+  viejo siga en prod.
+
 ## Pagos (MercadoPago — Checkout Pro)
 
 `app/routers/payments.py`. Integración **Checkout Pro** (NO Checkout API): `sdk.preference()
@@ -337,6 +370,21 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
 
 ## TODO / pendiente
 
+- **Eliminar `POST /exports/attempts/use` (deprecated 2026-07-31): PENDIENTE.** Lo reemplazó
+  `POST /exports/download` (ver "Exportaciones — gate de descarga"). Se dejó vivo para no
+  romper el front ya desplegado mientras se promueve el cambio. **Orden de despliegue**:
+  (1) backend a `main` con los dos endpoints, (2) front a prod con el flujo nuevo, (3) recién
+  entonces borrar el endpoint + `consume()`/`useAttempt()` en `3D/`.
+- **Watermark del PNG: sigue decidiéndose client-side** (`can('cleanImageExport')` en el
+  front), así que un override podría subir un PNG sin marca. El PDF sí quedó cerrado
+  server-side. Si molesta, re-watermarkear el PNG en el backend (Pillow) dentro de
+  `/exports/download`.
+- **Exports secundarios sin gate server-side**: la placa DXF/SVG (`PlatePanel`) y el PNG de
+  montaje (`FacadeMockup`) se descargan directo del cliente, gateados sólo por `can()`. Son
+  features pagas sin contador; si se quieren cerrar, pasarlos por `/exports/download`.
+- **Latencia del export**: ahora se suben varios MB de STL al backend. Con Render en Oregon
+  agrega segundos; se mitiga con la migración de región ya planificada (ver TODO de
+  co-ubicación Render/Neon en el `CLAUDE.md` raíz).
 - **Correo — Gmail "Enviar como" (Parte D del setup de correo): PENDIENTE.** Configurar en Gmail
   el "Enviar como" para **responder** desde `info@`/`support@`/`contacto@` (que el cliente vea la
   respuesta desde la direccion de la empresa, no desde el Gmail personal). Datos del SMTP de
