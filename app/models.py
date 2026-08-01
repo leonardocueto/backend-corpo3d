@@ -180,11 +180,38 @@ class UserDesign(Base):
     user: Mapped["User"] = relationship(back_populates="designs")
 
 
+class Subscription(Base):
+    """Suscripcion recurrente de Mercado Pago (Preapproval API). Multiples filas
+    por usuario (puede cancelar y re-suscribirse). `mp_preapproval_id` UNIQUE
+    es la clave de idempotencia para el webhook `subscription_preapproval`."""
+
+    __tablename__ = "subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    plan: Mapped[str] = mapped_column(String(16), nullable=False)
+    mp_preapproval_id: Mapped[str] = mapped_column(
+        String(128), unique=True, index=True, nullable=False
+    )
+    mp_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    mp_payer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship()
+
+
 class UserTier(Base):
     """Tier de un usuario. Una fila por usuario (`user_id` unico); sin fila se
-    trata como `free`. Los tier pagos (`mensual`/`anual`) dan exportaciones
-    ilimitadas mientras `expires_at` no haya vencido (se evalua contra la hora
-    del SERVIDOR al leer; un pago vencido revierte a free solo)."""
+    trata como `free`. Autoridad dual: suscripcion activa (primario) +
+    `expires_at` como safety net (fallback para legacy one-time y webhook que
+    no llega)."""
 
     __tablename__ = "user_tiers"
 
@@ -195,9 +222,9 @@ class UserTier(Base):
     tier: Mapped[str] = mapped_column(String(16), default="free", nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Marca de cuando se envio el aviso de "vence pronto" (job diario). Se estampa al
-    # avisar y se LIMPIA (=None) al renovar/pagar o cambiar el tier, para que el nuevo
-    # periodo vuelva a avisar. NULL = todavia no se aviso en el periodo vigente.
+    subscription_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="SET NULL"), nullable=True
+    )
     expiry_warning_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -212,10 +239,10 @@ class UserTier(Base):
 
 
 class Payment(Base):
-    """Pago de Mercado Pago (Checkout Pro / pago unico) que activo un tier. Sirve
-    de auditoria y, sobre todo, de garantia de IDEMPOTENCIA: MP reintenta el
-    webhook varias veces y `mp_payment_id` UNIQUE evita activar/duplicar dos veces
-    el mismo pago. Varias filas por usuario (cada compra/renovacion es una)."""
+    """Pago de Mercado Pago (one-time o suscripcion). Sirve de auditoria y de
+    garantia de IDEMPOTENCIA (`mp_payment_id` UNIQUE). Pagos de suscripcion
+    referencian su `Subscription` via `subscription_id`; pagos legacy one-time
+    tienen `subscription_id = NULL`."""
 
     __tablename__ = "payments"
 
@@ -224,15 +251,38 @@ class Payment(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
     plan: Mapped[str] = mapped_column(String(16), nullable=False)
-    # ID del pago en Mercado Pago. Unico (idempotencia). Nullable por si se quiere
-    # registrar un intento antes de conocerlo (hoy se crea ya con el id real).
     mp_payment_id: Mapped[str | None] = mapped_column(
         String(64), unique=True, index=True, nullable=True
     )
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    subscription_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship()
+
+
+class ExportLog(Base):
+    """Registro de auditoria de una descarga exitosa. El archivo .txt vive en
+    R2 (key en `r2_key`); esta fila es la fuente de verdad para el cleanup
+    cron (borra logs > 6 meses). Solo visible para admin."""
+
+    __tablename__ = "export_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    payment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("payments.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    r2_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True, nullable=False
     )
 
     user: Mapped["User"] = relationship()

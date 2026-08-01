@@ -1,21 +1,23 @@
 import io
+import json
 import posixpath
 import re
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
 from app.deps import get_current_user, require_admin
-from app.models import ExportWindow, User
+from app.models import ExportLog, ExportWindow, Payment, User
 from app.ratelimit import limiter
 from app.routers.tiers import user_is_unlimited
 from app.schemas import ExportAttemptsOut, SetAttemptsIn
+from app.storage import put_export_log
 
 # Limite de exportaciones (Free Tier). Ventana ROLLING de 24h anclada al primer
 # intento: el reset ocurre en window_start + WINDOW (hora del SERVIDOR, nunca la
@@ -178,6 +180,7 @@ def _validate_export_path(raw: str) -> str:
 @limiter.limit(DOWNLOAD_LIMIT)
 def download_export(
     request: Request,
+    background: BackgroundTasks,
     files: list[UploadFile] = File(...),
     structure_id: str = Form(...),
     project_name: str = Form(""),
@@ -189,7 +192,8 @@ def download_export(
     server-side (estructura premium -> requiere cuenta paga; free -> descuenta 1
     intento) y devuelve el ZIP armado aca. La response ES el artefacto: un
     override de responses en devtools no puede fabricar el ZIP del diseno actual.
-    El debit y la entrega son atomicos (commit recien con el ZIP armado)."""
+    El debit y la entrega son atomicos (commit recien con el ZIP armado).
+    Registra un ExportLog de auditoria y sube el .txt a R2 en background."""
     now = datetime.now(timezone.utc)
     unlimited = user_is_unlimited(db, user, now)
 
@@ -233,6 +237,34 @@ def download_export(
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, content in entries:
             zf.writestr(path, content)
+
+    # Audit log: ultimo pago aprobado del usuario (best-effort, nullable).
+    last_payment = db.scalar(
+        select(Payment)
+        .where(Payment.user_id == user.id, Payment.status == "approved")
+        .order_by(Payment.created_at.desc())
+        .limit(1)
+    )
+    downloaded_at = datetime.now(timezone.utc)
+    log = ExportLog(
+        user_id=user.id,
+        payment_id=last_payment.id if last_payment else None,
+        r2_key="",
+    )
+    db.add(log)
+    db.flush()
+    log.r2_key = f"exports/{user.id}/{log.id}.txt"
+
+    log_content = json.dumps({
+        "payment_id": str(last_payment.id) if last_payment else None,
+        "user_id": str(user.id),
+        "project_name": project_name or None,
+        "structure_id": structure_id,
+        "file_count": len(entries),
+        "generated_at": now.isoformat(),
+        "downloaded_at": downloaded_at.isoformat(),
+    })
+    background.add_task(put_export_log, log.r2_key, log_content)
 
     db.commit()
     return Response(

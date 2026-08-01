@@ -11,12 +11,12 @@ periodo vuelve a avisar.
 import argparse
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 
 from app.config import settings
 from app.database import SessionLocal
 from app.email import send_tier_expiring_email
-from app.models import User, UserTier
+from app.models import Subscription, User, UserTier
 from app.routers.tiers import PAID_TIERS
 
 
@@ -38,6 +38,12 @@ def main() -> None:
     try:
         # Tier pago, vigente (aun no vencido), dentro de la ventana de aviso y sin
         # aviso previo en este periodo. Solo usuarios activos.
+        has_active_sub = exists(
+            select(Subscription.id).where(
+                Subscription.user_id == UserTier.user_id,
+                Subscription.mp_status == "authorized",
+            )
+        )
         rows = db.execute(
             select(UserTier, User)
             .join(User, User.id == UserTier.user_id)
@@ -48,6 +54,7 @@ def main() -> None:
                 UserTier.expires_at <= window_end,
                 UserTier.expiry_warning_sent_at.is_(None),
                 User.is_active.is_(True),
+                ~has_active_sub,
             )
         ).all()
 

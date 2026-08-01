@@ -227,3 +227,53 @@ class DesignsPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# --- Pagos (Mercado Pago) ---
+
+
+class PaymentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    user_email: str
+    user_full_name: str | None
+    plan: str
+    status: str
+    amount: int
+    mp_payment_id: str | None
+    subscription_id: uuid.UUID | None
+    created_at: datetime
+
+
+class PaymentsPage(BaseModel):
+    items: list[PaymentOut]
+    total: int
+    page: int
+    page_size: int
+    currency: str
+
+
+# --- Suscripciones (Mercado Pago Preapproval) ---
+
+
+class SubscribeIn(BaseModel):
+    plan: Literal["mensual", "anual"]
+
+
+class SubscribeOut(BaseModel):
+    init_point: str
+
+
+class SubscriptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    plan: str
+    status: str
+    created_at: datetime
+
+
+class CancelSubscriptionOut(BaseModel):
+    status: str
