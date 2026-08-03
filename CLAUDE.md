@@ -428,9 +428,12 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
 - ~~Watermark del PNG client-side bypasseable~~ **HECHO (2026-08-03).** El backend
   re-watermarkea el PNG con Pillow para cuentas free (`_watermark_png` en `exports.py`).
   El front sigue aplicando su propio watermark (doble sello, enforcement real en el backend).
-- **Exports secundarios sin gate server-side**: la placa DXF/SVG (`PlatePanel`) y el PNG de
-  montaje (`FacadeMockup`) se descargan directo del cliente, gateados sólo por `can()`. Son
-  features pagas sin contador; si se quieren cerrar, pasarlos por `/exports/download`.
+- **Exports secundarios (placa DXF/SVG, montaje PNG): residuo aceptado (2026-08-03).** Se
+  generan 100% client-side (nesting JS + WebGL render); la geometria fabricable (STL/DXF del
+  ZIP) ya esta cerrada por `/exports/download`. Estos exports son presentacionales (layout de
+  placa, foto de montaje), gateados por `can()` (fail-closed en prod). No justifica proxearlos
+  por el backend: el usuario ya tiene los datos en memoria tras "Calcular placa" / abrir el
+  modal.
 - **Latencia del export**: ahora se suben varios MB de STL al backend. Con Render en Oregon
   agrega segundos; se mitiga con la migración de región ya planificada (ver TODO de
   co-ubicación Render/Neon en el `CLAUDE.md` raíz).
