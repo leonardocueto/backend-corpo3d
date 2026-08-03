@@ -448,8 +448,6 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   se convirtieron de `.webp` porque varios clientes de email no renderizan webp). Copia fuente de
   los PNG en `app/mailing/assets/`. **Pendiente visual**: verificar el render real en Gmail/Outlook
   una vez deployados los PNG en `corpolab3d.com/logo/` (el front tiene que estar publicado).
-- Conectar el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`,
-  capa de servicio con `credentials: "include"` y el fetching nativo de Nuxt 4).
 - Limpieza de filas vencidas (job periódico o `DELETE` de paso en login/signup): aplica a
   `sessions`, `password_reset_tokens`, `login_otps` y `pending_registrations` (todas guardan
   `expires_at`). Se resuelve con un `DELETE ... WHERE expires_at < now()`; **NO** justifica traer
