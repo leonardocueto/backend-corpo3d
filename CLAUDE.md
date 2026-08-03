@@ -165,8 +165,8 @@ generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
 **ZIP armado acá** (`zipfile` en memoria).
 
 - **Por qué existe**: el ZIP se armaba 100% en el navegador y el backend solo se consultaba
-  (`POST /exports/attempts/use`) → llamada **cooperativa**. Con un *override* de la respuesta
-  de `GET /exports/attempts` (`unlimited: true`) el cliente se auto-habilitaba descargas
+  (llamada cooperativa que el cliente podía saltear). Con un *override* de la respuesta de
+  `GET /exports/attempts` (`unlimited: true`) el cliente se auto-habilitaba descargas
   ilimitadas y estructuras premium. Ahora **la response ES el artefacto**: sin pasar la
   validación no hay archivo, y un override de responses no puede fabricar el ZIP.
 - **Orden de validación** (importa): (1) `structure_id ∈ PREMIUM_STRUCTURE_IDS` y usuario no
@@ -175,10 +175,9 @@ generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
   debitar, así un 4xx no consume intento): sin traversal ni paths absolutos, extensiones en
   `ALLOWED_EXPORT_EXTENSIONS`, tope `MAX_EXPORT_FILES`/`MAX_EXPORT_BYTES`; (3) **filtro del
   PDF** para cuentas free (la ficha técnica es feature paga); (4) free → `_consume_attempt`.
-- **`_consume_attempt(db, user_id, now)`**: extraído de `use_attempt`, descuenta bajo
-  `SELECT ... FOR UPDATE` **sin commitear** — el commit ocurre recién con el ZIP ya armado, así
-  el debit y la entrega son **atómicos** (si el armado falla, el rollback devuelve el intento;
-  antes, el intento se perdía si la generación explotaba en el cliente).
+- **`_consume_attempt(db, user_id, now)`**: descuenta bajo `SELECT ... FOR UPDATE` **sin
+  commitear** — el commit ocurre recién con el ZIP ya armado, así el debit y la entrega son
+  **atómicos** (si el armado falla, el rollback devuelve el intento).
 - `PREMIUM_STRUCTURE_IDS` guarda **solo los IDs**: las definiciones geométricas se quedan en el
   front a propósito, para que un Free pueda **previsualizar y editar** estructuras premium
   (funnel de venta). Lo que se corta es la **descarga**, no el preview. Si se agrega una
@@ -186,8 +185,6 @@ generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
 - **Residuo aceptado**: los adapters STL/DXF viven en el bundle (los necesita el preview), así
   que scripting activo en consola puede rearmar un ZIP local. Cubrimos el ataque por override
   de responses, que es el realista.
-- `POST /exports/attempts/use` queda **DEPRECATED** (ver TODO): se mantiene mientras el front
-  viejo siga en prod.
 - **Audit log de exportaciones**: cada descarga exitosa (incluido admin) registra un `ExportLog`
   en DB + sube un `.txt` con JSON a R2 (`exports/{user_id}/{log_id}.txt`) en **BackgroundTask**
   (no bloquea la response). El `.txt` contiene `payment_id` (último pago aprobado, nullable),
@@ -424,11 +421,8 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
 
 ## TODO / pendiente
 
-- **Eliminar `POST /exports/attempts/use` (deprecated 2026-07-31): PENDIENTE.** Lo reemplazó
-  `POST /exports/download` (ver "Exportaciones — gate de descarga"). Se dejó vivo para no
-  romper el front ya desplegado mientras se promueve el cambio. **Orden de despliegue**:
-  (1) backend a `main` con los dos endpoints, (2) front a prod con el flujo nuevo, (3) recién
-  entonces borrar el endpoint + `consume()`/`useAttempt()` en `3D/`.
+- ~~Eliminar `POST /exports/attempts/use` (deprecated 2026-07-31)~~ **HECHO (2026-08-03).**
+  Endpoint y dead code del front (`useAttempt()`, `consume()`) eliminados.
 - **Watermark del PNG: sigue decidiéndose client-side** (`can('cleanImageExport')` en el
   front), así que un override podría subir un PNG sin marca. El PDF sí quedó cerrado
   server-side. Si molesta, re-watermarkear el PNG en el backend (Pillow) dentro de

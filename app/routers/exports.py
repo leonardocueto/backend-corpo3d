@@ -128,31 +128,6 @@ def _consume_attempt(db: DbSession, user_id, now: datetime) -> ExportWindow:
     return win
 
 
-@router.post("/attempts/use", response_model=ExportAttemptsOut)
-def use_attempt(
-    user: User = Depends(get_current_user), db: DbSession = Depends(get_db)
-) -> ExportAttemptsOut:
-    """DEPRECATED: lo reemplaza POST /exports/download (que valida, descuenta y
-    entrega el ZIP en una sola request; este endpoint era cooperativo, un cliente
-    modificado podia no llamarlo). Se mantiene mientras el front viejo siga en
-    prod; eliminar cuando el flujo nuevo este desplegado.
-
-    Valida y consume un intento. Ilimitado (admin o tier pago vigente): no
-    toca la tabla. Free: descuenta 1 si quedan; si no, 403."""
-    now = datetime.now(timezone.utc)
-    if user_is_unlimited(db, user, now):
-        return _admin_response()
-
-    win = _consume_attempt(db, user.id, now)
-    db.commit()
-    db.refresh(win)
-    return ExportAttemptsOut(
-        limit=DAILY_LIMIT,
-        remaining=win.remaining_attempts,
-        unlimited=False,
-        reset_at=win.window_start + WINDOW,
-    )
-
 
 def _safe_zip_name(raw: str) -> str:
     """Nombre de archivo del ZIP saneado desde el nombre del proyecto."""
