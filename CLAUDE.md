@@ -83,11 +83,14 @@ backend/
   (`"mensual"` | `"anual"`), `mp_preapproval_id` (UNIQUE — idempotencia), `mp_status`
   (`"pending"` | `"authorized"` | `"paused"` | `"cancelled"`), `mp_payer_id` (nullable),
   `created_at`, `updated_at`. Múltiples filas por usuario (cancel + re-subscribe).
-- **ExportLog** (migración `0011`): `id` (UUID), `user_id` (FK CASCADE), `payment_id` (FK SET
-  NULL, nullable — último pago aprobado al momento del download), `r2_key`
-  (`"exports/{user_id}/{id}.txt"`), `created_at` (indexed — para cleanup cron).
+- **ExportLog** (migración `0011`): `id` (UUID), `user_id` (FK **SET NULL**, nullable —
+  migración `0012`), `payment_id` (FK SET NULL, nullable — último pago aprobado al momento del
+  download), `r2_key` (`"exports/{user_id}/{id}.txt"`), `created_at` (indexed — para cleanup
+  cron). Borrar un User deja los logs con `user_id=NULL`.
 - **Payment** ganó `subscription_id` (FK `subscriptions.id` ON DELETE SET NULL, nullable) —
-  distingue pagos de suscripción de legacy one-time.
+  distingue pagos de suscripción de legacy one-time. `user_id` pasó a FK **SET NULL** + nullable
+  (migración `0012`): borrar un User deja sus pagos con `user_id=NULL` (auditoria). `GET /payments`
+  usa outer join; filas huérfanas muestran "Usuario eliminado" en el panel admin.
 - **UserTier** ganó `subscription_id` (FK `subscriptions.id` ON DELETE SET NULL, nullable) —
   linkea la suscripción activa que alimenta el tier.
 

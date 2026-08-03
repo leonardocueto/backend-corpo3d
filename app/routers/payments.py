@@ -138,7 +138,7 @@ def list_payments(
     total = db.scalar(select(func.count()).select_from(Payment).where(*filters)) or 0
     rows = db.execute(
         select(Payment, User.email, User.full_name)
-        .join(User, User.id == Payment.user_id)
+        .outerjoin(User, User.id == Payment.user_id)
         .where(*filters)
         .order_by(Payment.created_at.desc(), Payment.id.desc())
         .offset((page - 1) * page_size)

@@ -174,7 +174,7 @@ def delete_user(
     db: DbSession = Depends(get_db),
     current: User = Depends(require_admin),
 ):
-    """Elimina un usuario (sus sesiones caen por ON DELETE CASCADE)."""
+    """Elimina un usuario. Sesiones/designs caen por CASCADE; pagos y export logs conservan user_id=NULL."""
     if user_id == current.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="No podes eliminar tu propio usuario")
     user = db.get(User, user_id)
