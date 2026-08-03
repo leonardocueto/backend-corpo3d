@@ -97,7 +97,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
-    schedule: "30 12 * * *"   # diario 12:30 UTC (30 min offset del expiry cron)
+    schedule: "30 13 * * 0"   # semanal domingos 13:30 UTC (~10:30 AR)
     dockerCommand: python -m scripts.cleanup_export_logs
     envVars:
       - key: ENVIRONMENT
@@ -113,4 +113,21 @@ services:
       - key: R2_SECRET_ACCESS_KEY
         sync: false
       - key: R2_BUCKET
+        sync: false
+
+  # Cron Job: limpieza de filas vencidas (sessions, password_reset_tokens,
+  # login_otps, pending_registrations). Solo toca DB, no R2 ni mails.
+  - type: cron
+    name: cron-corpo3d-expired-cleanup
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    schedule: "0 13 * * 0"   # semanal domingos 13:00 UTC (~10:00 AR)
+    dockerCommand: python -m scripts.cleanup_expired
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SESSION_SECRET
+        sync: false
+      - key: DATABASE_URL
         sync: false

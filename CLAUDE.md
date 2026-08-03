@@ -265,19 +265,24 @@ el dashboard.
   así el nuevo período vuelve a avisar (migración `0010`). Flag **`--dry-run`** para listar sin
   enviar ni estampar.
 - **`scripts/cleanup_export_logs.py`** — limpieza de **logs de auditoría de exportaciones** >
-  `export_log_retention_days` (default **180** = 6 meses). Cron **diario** (`schedule: "30 12
-  * * *"` = 12:30 UTC, offset del expiry cron), nombre **`cron-corpo3d-export-cleanup`**. Borra
+  `export_log_retention_days` (default **180** = 6 meses). Cron **semanal** (`schedule: "30 13
+  * * 0"` = domingos 13:30 UTC ≈ 10:30 AR), nombre **`cron-corpo3d-export-cleanup`**. Borra
   los `ExportLog` de la DB + sus `.txt` de R2 (idempotente: key inexistente = no-op). Los
   `Payment` **NO se tocan** (quedan para siempre). Chunks de 500. Flag **`--dry-run`**. Env vars:
   `DATABASE_URL`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`,
   `SESSION_SECRET` (dummy — `app.config` lo exige).
+- **`scripts/cleanup_expired.py`** — limpieza de **filas vencidas** de tablas efímeras:
+  `sessions`, `password_reset_tokens`, `login_otps`, `pending_registrations` (todas con
+  `expires_at < now()`). Cron **semanal** (`schedule: "0 13 * * 0"` = domingos 13:00 UTC ≈
+  10:00 AR), nombre **`cron-corpo3d-expired-cleanup`**. No toca R2 ni manda mails. Flag
+  **`--dry-run`**. Env vars: `DATABASE_URL`, `SESSION_SECRET` (dummy).
 - **Costo**: cada cron se factura aparte del web, solo por el tiempo que corre (segundos/día →
   centavos); no consumen ni reemplazan la instancia web.
 
-**Estado (2026-07-25): DESPLEGADO y PROBADO en prod.** Se promovió `dev`→`main`, el Blueprint
-creó el servicio **`cron-corpo3d-expiry`** y un **"Trigger Run"** manual dio
-`Avisos enviados: 0` + `finished successfully` (0 es OK: no había tiers venciendo en 10 días).
-Ya corre solo cada día a las 12:00 UTC.
+**Estado:** `cron-corpo3d-expiry` **DESPLEGADO y PROBADO** (2026-07-25, `Avisos enviados: 0` +
+`finished successfully`). `cron-corpo3d-export-cleanup` **DESPLEGADO y PROBADO** (2026-08-03,
+`Logs eliminados: 0` + `finished successfully`). `cron-corpo3d-expired-cleanup` pendiente de
+deploy (se crea al promover a `main`).
 
 - **Env vars del cron = MANUALES.** Es un **servicio aparte**: las vars `sync: false` del bloque
   cron (`DATABASE_URL`, `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`, `SESSION_SECRET`) **NO se
@@ -357,7 +362,7 @@ desde Render). Cookie **host-only** (`COOKIE_DOMAIN` ausente a propósito), `COO
 - **Cloudflare WAF (plan Free)** — reglas activas (2026-07-24):
   - Custom rule 1 (Skip): `/.well-known/` + `/payments/webhook` → saltea todo el WAF (protege la
     renovación del cert y el webhook de MP).
-  - Custom rule "Admin solo Argentina" (Block): `/admin` o `/ingresar` con `ip.src.country ne "AR"`.
+  - Custom rule "Admin solo Argentina" (Block): `starts_with "/admin"` o `/ingresar` con `ip.src.country ne "AR"` (ampliada 2026-08-03).
   - Custom rule "Challenge fuera de LATAM" (Managed Challenge): acotada a `http.host eq
     "www.corpolab3d.com"` (NO api, o rompería los fetch del front con challenge) y `not cf.client.bot`.
   - Rate limiting rule (0/1 del Free): `/auth/login` POST, 5/10s → Block (borde).
@@ -392,12 +397,12 @@ Registros DNS en Cloudflare (todos **DNS-only** / nube gris; MX y TXT ni se prox
 | Resend | TXT (DKIM) | `resend._domainkey` | `p=MIG...` |
 | Resend | MX | `send` | `feedback-smtp...amazonses.com` (prio 10) |
 | Resend | TXT (SPF) | `send` | `v=spf1 include:amazonses.com ~all` |
-| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=none;` |
+| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=quarantine;` |
 
 > **No pisar el SPF de la raiz** (Email Routing): el SPF de Resend vive en el subdominio `send`,
 > no en la raiz. Con el dominio verificado en Resend ya **no hay bloqueo tecnico para activar el
-> OTP de login** (`OTP_ENABLED`); esa activacion queda como decision aparte. DMARC arranca en
-> `p=none` (monitoreo) y se endurece luego. El WAF no interviene (el mail va por MX/SMTP, no HTTP).
+> OTP de login** (`OTP_ENABLED`); esa activacion queda como decision aparte. DMARC en
+> `p=quarantine` (endurecido 2026-08-03; siguiente paso: `p=reject`). El WAF no interviene (el mail va por MX/SMTP, no HTTP).
 
 **Estado (2026-07-24):** recepcion (info/support/soporte/contacto/ventas + catch-all APAGADO →
 las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMAIL_FROM` en Render
@@ -406,7 +411,7 @@ las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMA
 paginas legales apuntan a `contacto@corpolab3d.com` (rama `fix/contacto-emails` mergeada a `dev`).
 **Pendiente** (ver "TODO / pendiente"): Gmail "Enviar como" para responder desde los alias. Los
 templates branded de los mails (header/footer + tema claro, Jinja2 en `app/mailing/`) ya están
-**HECHOS** (2026-07-24); falta solo la verificación visual en Gmail/Outlook post-deploy de los PNG.
+**HECHOS** (2026-07-24); verificación visual en Gmail/Outlook **OK** (2026-08-03).
 
 ## Convenciones / cuidados
 
@@ -454,13 +459,9 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   se borró `app/templates/otp.html`). **Logos**: los mails apuntan al **CDN del front**
   (`{FRONTEND_URL}/logo/logo-texto.png` y `logo-completo.png`, PNG servidos por Vercel/Cloudflare;
   se convirtieron de `.webp` porque varios clientes de email no renderizan webp). Copia fuente de
-  los PNG en `app/mailing/assets/`. **Pendiente visual**: verificar el render real en Gmail/Outlook
-  una vez deployados los PNG en `corpolab3d.com/logo/` (el front tiene que estar publicado).
-- Limpieza de filas vencidas (job periódico o `DELETE` de paso en login/signup): aplica a
-  `sessions`, `password_reset_tokens`, `login_otps` y `pending_registrations` (todas guardan
-  `expires_at`). Se resuelve con un `DELETE ... WHERE expires_at < now()`; **NO** justifica traer
-  Redis (ver la nota de Redis). Ya hay infra de **Cron Job de Render** (ver "Jobs programados") →
-  este cleanup puede colgarse ahí como otro script diario cuando se implemente.
+  los PNG en `app/mailing/assets/`. Verificación visual en Gmail/Outlook **OK** (2026-08-03).
+- ~~Limpieza de filas vencidas~~ **HECHO (2026-08-03)**: `scripts/cleanup_expired.py`, cron
+  semanal `cron-corpo3d-expired-cleanup` (ver "Jobs programados").
 - **Redis — cuándo SÍ, cuándo NO (decisión 2026-07-24, a futuro):** hoy **no se usa** y no hace
   falta (single-instance, "pocos usuarios internos"). Todo el estado efímero (sesiones, tokens de
   reset, OTP, pending registrations) vive en **Postgres a propósito**, por la **atomicidad
@@ -501,9 +502,8 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   desde el panel de MP da 200). El día que se lance: activar Credenciales de producción en MP,
   cambiar `MP_ACCESS_TOKEN` al de producción, rotar `MP_WEBHOOK_SECRET` (se filtró en debug) y
   probar un pago real chico.
-- **Servir estáticos desde un bucket de estáticos: PENDIENTE (a futuro).** Mover los assets
-  estáticos a un **bucket de object storage** (ej. Cloudflare R2 / S3) servido por CDN, en vez
-  de servirlos desde el backend. Aplica a lo estático que hoy pueda estar saliendo por el
-  proceso FastAPI (ej. los PNG de logos de los mails en `app/mailing/assets/`, o cualquier
-  archivo público). Definir el bucket, el dominio/CDN que lo expone y actualizar las URLs
-  (`assets_base_url` / `FRONTEND_URL`) que apuntan a los assets.
+- ~~Servir estáticos desde un bucket~~ **NO NECESARIO (2026-08-03).** El backend NO sirve
+  assets estáticos: los logos PNG de los mails ya se sirven desde el **CDN del frontend**
+  (Vercel + Cloudflare) via `{FRONTEND_URL}/logo/`. Las copias en `app/mailing/assets/` son
+  fuente de respaldo, no se exponen. Si el día de mañana hay assets que el backend deba servir
+  directamente, reconsiderar con un bucket público en R2.
