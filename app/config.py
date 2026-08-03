@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     price_anual: int = 150000
     currency_id: str = "ARS"
 
+    # Retencion de logs de auditoria de exportaciones (dias). El cron diario
+    # borra los ExportLog + sus .txt en R2 que superen esta edad.
+    export_log_retention_days: int = 180
+
     # Login con Google (OAuth 2.0 / OIDC). El Client ID es PUBLICO (sirve para
     # validar la `aud` del ID token); no hay client secret. Opcional: si falta,
     # el endpoint /auth/google responde 503 (la app arranca igual).

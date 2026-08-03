@@ -1,16 +1,23 @@
+import io
+import json
+import posixpath
+import re
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
 from app.deps import get_current_user, require_admin
-from app.models import ExportWindow, User
+from app.models import ExportLog, ExportWindow, Payment, User
+from app.ratelimit import limiter
 from app.routers.tiers import user_is_unlimited
 from app.schemas import ExportAttemptsOut, SetAttemptsIn
+from app.storage import put_export_log
 
 # Limite de exportaciones (Free Tier). Ventana ROLLING de 24h anclada al primer
 # intento: el reset ocurre en window_start + WINDOW (hora del SERVIDOR, nunca la
@@ -19,6 +26,28 @@ router = APIRouter(prefix="/exports", tags=["exports"])
 
 DAILY_LIMIT = 3
 WINDOW = timedelta(hours=24)
+
+# Estructuras premium (solo los IDs; las definiciones geometricas viven en el
+# front, que las necesita para el preview). El gate real de descarga es este:
+# un free puede previsualizarlas pero /exports/download se las rechaza.
+PREMIUM_STRUCTURE_IDS = {
+    "snap-fit-pvc",
+    "double-channel",
+    "snap-lip",
+    "deep-base",
+    "neon-3d",
+    "corporea-aluminio",
+}
+
+# Limites del payload de /exports/download. El entregable trae, ademas del
+# archivo completo por parte (hasta 4 partes x 3 formatos + PNG + PDF), un
+# archivo POR LETRA y parte (pieza-N.dxf/svg/stl) -> un texto largo genera
+# facil >100 archivos. El tope de bytes acota la RAM del armado del ZIP (todo
+# en memoria) y queda debajo del limite de upload de Cloudflare (100 MB).
+DOWNLOAD_LIMIT = "10/minute"
+MAX_EXPORT_FILES = 400
+MAX_EXPORT_BYTES = 80 * 1024 * 1024
+ALLOWED_EXPORT_EXTENSIONS = {".dxf", ".svg", ".stl", ".png", ".pdf"}
 
 
 def _admin_response() -> ExportAttemptsOut:
@@ -78,30 +107,43 @@ def get_attempts(
     )
 
 
-@router.post("/attempts/use", response_model=ExportAttemptsOut)
-def use_attempt(
-    user: User = Depends(get_current_user), db: DbSession = Depends(get_db)
-) -> ExportAttemptsOut:
-    """Valida y consume un intento. Ilimitado (admin o tier pago vigente): no
-    toca la tabla. Free: descuenta 1 si quedan; si no, 403. Fuente de verdad."""
-    now = datetime.now(timezone.utc)
-    if user_is_unlimited(db, user, now):
-        return _admin_response()
+def _consume_attempt(db: DbSession, user_id, now: datetime) -> ExportWindow:
+    """Valida y descuenta 1 intento bajo lock (FOR UPDATE), SIN commitear: el
+    caller decide cuando confirmar. Asi /exports/download puede armar el ZIP con
+    el debit pendiente y, si el armado falla, el rollback devuelve el intento.
+    Ventana expirada -> arranca una nueva con el limite completo. Sin intentos ->
+    403 (sin cambios que persistir; el cierre de la sesion hace rollback)."""
+    win = _get_or_create_locked(db, user_id, now)
 
-    win = _get_or_create_locked(db, user.id, now)
-
-    # Ventana expirada -> arranca una nueva con el limite completo.
     if now >= win.window_start + WINDOW:
         win.window_start = now
         win.remaining_attempts = DAILY_LIMIT
 
     if win.remaining_attempts <= 0:
-        # Sin cambios que persistir; el cierre de la sesion hace rollback.
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, detail="Sin intentos de exportacion disponibles"
         )
 
     win.remaining_attempts -= 1
+    return win
+
+
+@router.post("/attempts/use", response_model=ExportAttemptsOut)
+def use_attempt(
+    user: User = Depends(get_current_user), db: DbSession = Depends(get_db)
+) -> ExportAttemptsOut:
+    """DEPRECATED: lo reemplaza POST /exports/download (que valida, descuenta y
+    entrega el ZIP en una sola request; este endpoint era cooperativo, un cliente
+    modificado podia no llamarlo). Se mantiene mientras el front viejo siga en
+    prod; eliminar cuando el flujo nuevo este desplegado.
+
+    Valida y consume un intento. Ilimitado (admin o tier pago vigente): no
+    toca la tabla. Free: descuenta 1 si quedan; si no, 403."""
+    now = datetime.now(timezone.utc)
+    if user_is_unlimited(db, user, now):
+        return _admin_response()
+
+    win = _consume_attempt(db, user.id, now)
     db.commit()
     db.refresh(win)
     return ExportAttemptsOut(
@@ -109,6 +151,128 @@ def use_attempt(
         remaining=win.remaining_attempts,
         unlimited=False,
         reset_at=win.window_start + WINDOW,
+    )
+
+
+def _safe_zip_name(raw: str) -> str:
+    """Nombre de archivo del ZIP saneado desde el nombre del proyecto."""
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", raw.strip()).strip("-") or "export"
+    return f"{name[:80]}.zip"
+
+
+def _validate_export_path(raw: str) -> str:
+    """Path relativo del archivo dentro del ZIP, saneado. Rechaza traversal,
+    absolutos y extensiones fuera de la whitelist (400)."""
+    path = (raw or "").replace("\\", "/").strip()
+    if not path or path.startswith("/") or ":" in path:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Path de archivo invalido")
+    normalized = posixpath.normpath(path)
+    parts = normalized.split("/")
+    if normalized.startswith("/") or ".." in parts or normalized in {".", ""}:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Path de archivo invalido")
+    ext = posixpath.splitext(normalized)[1].lower()
+    if ext not in ALLOWED_EXPORT_EXTENSIONS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Tipo de archivo no permitido")
+    return normalized
+
+
+@router.post("/download")
+@limiter.limit(DOWNLOAD_LIMIT)
+def download_export(
+    request: Request,
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    structure_id: str = Form(...),
+    project_name: str = Form(""),
+    user: User = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> Response:
+    """Punto de enforcement REAL de la descarga: recibe los archivos generados en
+    el cliente (DXF/SVG/STL/PNG/PDF con su path relativo como filename), valida
+    server-side (estructura premium -> requiere cuenta paga; free -> descuenta 1
+    intento) y devuelve el ZIP armado aca. La response ES el artefacto: un
+    override de responses en devtools no puede fabricar el ZIP del diseno actual.
+    El debit y la entrega son atomicos (commit recien con el ZIP armado).
+    Registra un ExportLog de auditoria y sube el .txt a R2 en background."""
+    now = datetime.now(timezone.utc)
+    unlimited = user_is_unlimited(db, user, now)
+
+    # Estructura premium: solo cuentas ilimitadas (detail distinguible del 403
+    # de intentos para que el front abra el modal de upsell correcto).
+    if structure_id in PREMIUM_STRUCTURE_IDS and not unlimited:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="premium_structure")
+
+    # Sanitizar el payload ANTES de debitar (un 4xx aca no consume intento).
+    if len(files) == 0 or len(files) > MAX_EXPORT_FILES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Cantidad de archivos invalida")
+
+    entries: list[tuple[str, bytes]] = []
+    total = 0
+    seen: set[str] = set()
+    for f in files:
+        path = _validate_export_path(f.filename or "")
+        if path in seen:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Path de archivo duplicado")
+        seen.add(path)
+        content = f.file.read()
+        total += len(content)
+        if total > MAX_EXPORT_BYTES:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Export demasiado grande"
+            )
+        # La ficha tecnica PDF es feature paga: se filtra server-side (un free
+        # con el flag `unlimited` forzado en el cliente tampoco la consigue).
+        if path.lower().endswith(".pdf") and not unlimited:
+            continue
+        entries.append((path, content))
+
+    if not entries:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Export sin archivos")
+
+    # Free: debitar bajo lock, sin commit todavia (atomico con el armado).
+    if not unlimited:
+        _consume_attempt(db, user.id, now)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in entries:
+            zf.writestr(path, content)
+
+    # Audit log: ultimo pago aprobado del usuario (best-effort, nullable).
+    last_payment = db.scalar(
+        select(Payment)
+        .where(Payment.user_id == user.id, Payment.status == "approved")
+        .order_by(Payment.created_at.desc())
+        .limit(1)
+    )
+    downloaded_at = datetime.now(timezone.utc)
+    log = ExportLog(
+        user_id=user.id,
+        payment_id=last_payment.id if last_payment else None,
+        r2_key="",
+    )
+    db.add(log)
+    db.flush()
+    log.r2_key = f"exports/{user.id}/{log.id}.txt"
+
+    log_content = json.dumps({
+        "payment_id": str(last_payment.id) if last_payment else None,
+        "user_id": str(user.id),
+        "project_name": project_name or None,
+        "structure_id": structure_id,
+        "file_count": len(entries),
+        "generated_at": now.isoformat(),
+        "downloaded_at": downloaded_at.isoformat(),
+    })
+    background.add_task(put_export_log, log.r2_key, log_content)
+
+    db.commit()
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_safe_zip_name(project_name)}"'
+        },
     )
 
 

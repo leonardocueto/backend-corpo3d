@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Suscripción cancelada - CorpoLab 3D{% endblock %}
+{% block preheader %}Tu suscripción al plan {{ plan_label }} fue cancelada.{% endblock %}
+{% block content %}
+<h1 style="margin:0 0 12px 0; font-size:23px; line-height:1.3; font-weight:700; color:#1b1b1b;">Suscripción cancelada</h1>
+<p style="margin:0 0 22px 0; font-size:15px; line-height:1.6; color:#6b6b6b;">
+  Tu suscripción al plan <strong>{{ plan_label }}</strong> fue cancelada. No se realizarán
+  más cobros automáticos.
+</p>
+<p style="margin:0 0 24px 0; font-size:15px; line-height:1.6; color:#6b6b6b;">
+  Tu cuenta vuelve al plan gratuito con las limitaciones estándar. Si cambiás de opinión,
+  podés volver a suscribirte en cualquier momento:
+</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;">
+  <tr>
+    <td align="center" style="border-radius:10px; background-color:#4e5af2; background-image:linear-gradient(90deg,#4e5af2,#2f37ad);">
+      <a href="{{ reactivate_link }}"
+         style="display:inline-block; padding:13px 30px; font-size:15px; font-weight:600; color:#ffffff; text-decoration:none;">
+        Ver planes
+      </a>
+    </td>
+  </tr>
+</table>
+<p style="margin:0; font-size:14px; line-height:1.6; color:#9a9a9a;">
+  Gracias por haber sido parte. ¡Te esperamos de vuelta!
+</p>
+{% endblock %}

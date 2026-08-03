@@ -79,6 +79,17 @@ backend/
   con Google no esta activo, ver flujo de auth #6.)
 - **Session**: `id` (UUID), `user_id` (FK, `ON DELETE CASCADE`), `token_hash` (único),
   `expires_at`, `created_at`, `revoked_at` (nullable). Borrar un User borra sus sesiones.
+- **Subscription** (migración `0011`): `id` (UUID), `user_id` (FK CASCADE), `plan`
+  (`"mensual"` | `"anual"`), `mp_preapproval_id` (UNIQUE — idempotencia), `mp_status`
+  (`"pending"` | `"authorized"` | `"paused"` | `"cancelled"`), `mp_payer_id` (nullable),
+  `created_at`, `updated_at`. Múltiples filas por usuario (cancel + re-subscribe).
+- **ExportLog** (migración `0011`): `id` (UUID), `user_id` (FK CASCADE), `payment_id` (FK SET
+  NULL, nullable — último pago aprobado al momento del download), `r2_key`
+  (`"exports/{user_id}/{id}.txt"`), `created_at` (indexed — para cleanup cron).
+- **Payment** ganó `subscription_id` (FK `subscriptions.id` ON DELETE SET NULL, nullable) —
+  distingue pagos de suscripción de legacy one-time.
+- **UserTier** ganó `subscription_id` (FK `subscriptions.id` ON DELETE SET NULL, nullable) —
+  linkea la suscripción activa que alimenta el tier.
 
 ## Flujo de auth
 
@@ -142,37 +153,96 @@ backend/
      actual, el reenvío vuelve a estar disponible. (Además hay rate-limit slowapi 1/min por IP,
      que el cooldown de 3 min ya subsume.)
 
-## Pagos (MercadoPago — Checkout Pro)
+## Exportaciones — gate de descarga (`app/routers/exports.py`)
 
-`app/routers/payments.py`. Integración **Checkout Pro** (NO Checkout API): `sdk.preference()
-.create(...)` → devuelve `init_point`, el front redirige a la página de MP.
+**`POST /exports/download` es el punto de enforcement REAL de la descarga** (agregado el
+2026-07-31, rama `feature/export-download-gate`). Recibe por **multipart** los archivos que
+generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
+`cuerpo/pieza-1.stl`), más `structure_id` y `project_name`; valida server-side y devuelve el
+**ZIP armado acá** (`zipfile` en memoria).
+
+- **Por qué existe**: el ZIP se armaba 100% en el navegador y el backend solo se consultaba
+  (`POST /exports/attempts/use`) → llamada **cooperativa**. Con un *override* de la respuesta
+  de `GET /exports/attempts` (`unlimited: true`) el cliente se auto-habilitaba descargas
+  ilimitadas y estructuras premium. Ahora **la response ES el artefacto**: sin pasar la
+  validación no hay archivo, y un override de responses no puede fabricar el ZIP.
+- **Orden de validación** (importa): (1) `structure_id ∈ PREMIUM_STRUCTURE_IDS` y usuario no
+  ilimitado → **403 `detail="premium_structure"`** (detail distinguible para que el front abra
+  el modal de upsell y no el de "sin intentos"); (2) sanitización del payload (**antes** de
+  debitar, así un 4xx no consume intento): sin traversal ni paths absolutos, extensiones en
+  `ALLOWED_EXPORT_EXTENSIONS`, tope `MAX_EXPORT_FILES`/`MAX_EXPORT_BYTES`; (3) **filtro del
+  PDF** para cuentas free (la ficha técnica es feature paga); (4) free → `_consume_attempt`.
+- **`_consume_attempt(db, user_id, now)`**: extraído de `use_attempt`, descuenta bajo
+  `SELECT ... FOR UPDATE` **sin commitear** — el commit ocurre recién con el ZIP ya armado, así
+  el debit y la entrega son **atómicos** (si el armado falla, el rollback devuelve el intento;
+  antes, el intento se perdía si la generación explotaba en el cliente).
+- `PREMIUM_STRUCTURE_IDS` guarda **solo los IDs**: las definiciones geométricas se quedan en el
+  front a propósito, para que un Free pueda **previsualizar y editar** estructuras premium
+  (funnel de venta). Lo que se corta es la **descarga**, no el preview. Si se agrega una
+  estructura premium al catálogo del front, **agregar su id acá también**.
+- **Residuo aceptado**: los adapters STL/DXF viven en el bundle (los necesita el preview), así
+  que scripting activo en consola puede rearmar un ZIP local. Cubrimos el ataque por override
+  de responses, que es el realista.
+- `POST /exports/attempts/use` queda **DEPRECATED** (ver TODO): se mantiene mientras el front
+  viejo siga en prod.
+- **Audit log de exportaciones**: cada descarga exitosa (incluido admin) registra un `ExportLog`
+  en DB + sube un `.txt` con JSON a R2 (`exports/{user_id}/{log_id}.txt`) en **BackgroundTask**
+  (no bloquea la response). El `.txt` contiene `payment_id` (último pago aprobado, nullable),
+  `user_id`, `project_name`, `structure_id`, `file_count`, `generated_at`, `downloaded_at`.
+  Solo visible para admin/interno. El ExportLog en DB es la fuente de verdad; el .txt en R2 es
+  best-effort (fallo del upload se loguea y se traga). Retención: 6 meses (cron diario
+  `cleanup_export_logs.py` borra los viejos).
+
+## Pagos (MercadoPago — Checkout Pro + Suscripciones)
+
+`app/routers/payments.py`. Dos modalidades coexistentes:
+
+### Legacy — Checkout Pro (pago único)
+
+`sdk.preference().create(...)` → devuelve `init_point`, el front redirige a la página de MP.
+`POST /payments/checkout` (DEPRECATED — se mantiene mientras el front viejo siga en prod).
+
+### Suscripciones — Preapproval API (débito automático)
+
+`sdk.preapproval().create(...)` con `status: "pending"` → MP muestra su página hosted donde el
+usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`): no requiere
+`card_token_id` desde el front.
+
+- `POST /payments/subscribe`: crea la preapproval en MP + inserta `Subscription` en DB → retorna
+  `init_point`. Guard: 409 si ya hay suscripción `authorized`.
+- `GET /payments/subscription`: suscripción activa del usuario (non-cancelled más reciente) o
+  `null`.
+- `POST /payments/cancel-subscription`: cancela en MP + deactiva el tier.
+
+### Invariantes comunes
 
 - **Anti-tamper**: el cliente manda solo `{ plan }`; el **monto lo fija el servidor** (precios
   en `config`). `GET /plans` expone los precios (la UI los lee de ahí, nada hardcodeado).
 - **El tier se activa SOLO desde el webhook con firma validada** (`POST /payments/webhook`),
-  nunca desde el redirect del navegador (`back_urls` es spoofeable). Idempotente por
-  `Payment.mp_payment_id` UNIQUE (MP reintenta el webhook).
-- **Firma del webhook** (`_valid_signature`): HMAC-SHA256 con `MP_WEBHOOK_SECRET`. Manifest
-  `id:<data.id>;request-id:<x-request-id>;ts:<ts>;`. Sin secret o firma que no matchea → **401**.
-- **`notification_url`** = `{BACKEND_URL}/payments/webhook` = `api.corpolab3d.com/...` → pasa
-  por Cloudflare (trae `x-origin-secret`, pasa el guard) y la **Custom rule 1 (Skip)** de
-  Cloudflare lo exime de todo el WAF.
-- **Mails de resultado (2026-07-25)**: el webhook maneja estados **terminales** y avisa por
-  email (en BackgroundTask): `approved` → activa tier + registra `Payment` + `send_payment_
-  approved_email`; `rejected`/`cancelled` → registra `Payment` con ese status (auditoría +
-  idempotencia) + `send_payment_rejected_email` (link "Reintentar" → `/pricing`). `pending`/
-  `in_process` → sin acción (como antes). Un solo mail por pago gracias al `mp_payment_id`
-  UNIQUE (los reintentos del webhook no re-mailean). El **tier NO se toca** en el fallo.
+  nunca desde el redirect del navegador. Idempotente por `Payment.mp_payment_id` UNIQUE.
+- **Firma del webhook** (`_valid_signature`): HMAC-SHA256 con `MP_WEBHOOK_SECRET`. Sin secret o
+  firma que no matchea → **401**. Misma firma para todos los topics.
+- **Webhook 3 topics**: `payment` (legacy one-time), `subscription_preapproval` (cambio de
+  estado de la suscripción: authorized/paused/cancelled), `subscription_authorized_payment`
+  (cobro recurrente: approved/rejected).
+- **Tier dual-authority**: `Subscription.mp_status == "authorized"` (primario) +
+  `UserTier.expires_at > now` (fallback para legacy one-time y safety net por webhook que no
+  llega). `user_is_unlimited()` chequea ambos: suscripción primero, expiry después.
+- **Coexistencia**: pagos legacy (`subscription_id = NULL`) siguen funcionando por `expires_at`.
+- **Mails de suscripción** (4 templates Jinja2): activated, cancelled, paused, charge_failed.
+- **Mails de resultado (legacy)**: approved → activa tier; rejected/cancelled → registra el
+  status + email.
+- **Reembolsos**: se hacen **manual desde el panel de Mercado Pago** (no hay endpoint en el
+  backend). Cancelar la suscripción corta los cobros futuros pero no reembolsa el período ya
+  cobrado. Decisión de producto (2026-08-01): mantenerlo manual mientras el volumen sea bajo.
+- **Botón de arrepentimiento** (Ley 24.240 art. 34 + Res. 424/2020): `POST /payments/withdrawal`
+  (endpoint **público**, sin sesión, rate-limit 3/min). Recibe `full_name`, `email` y `reason`;
+  manda email a `info@corpolab3d.com` con los datos (template `withdrawal_request.html`). El
+  reembolso se gestiona manual desde el panel de MP. El front tiene la página `/arrepentimiento`
+  con formulario + links en el footer de la landing y en `/pricing`.
 
-**Estado (2026-07-24): PROBADO, sin activar producción.** La firma funciona — la **"Simular
-notificación"** del panel de MP da **200**. Pero los pagos de PRUEBA daban **401**: es un
-**artefacto del sandbox de MP**, no un bug. Motivo: los pagos con "Credenciales de prueba" los
-cobra una **cuenta test auto-generada** (≈`3483540259`) que MP firma con **otro** secreto,
-distinto al del webhook de tu cuenta real (≈`257561078`, el `0f2fbd41…`). Hay **un solo
-secreto por app** (igual en Modo prueba y productivo). **En producción validará** (el cobrador
-será tu cuenta real, dueña del secreto). Se decidió **Camino B**: confiar en lo probado y
-verificar al activar producción. `MP_ACCESS_TOKEN` y `MP_WEBHOOK_SECRET` se cargan a mano en
-Render (`sync: false`).
+**Estado (2026-07-24): legacy PROBADO, suscripciones por probar con credenciales de producción.**
+`MP_ACCESS_TOKEN` y `MP_WEBHOOK_SECRET` se cargan a mano en Render (`sync: false`).
 
 ## Jobs programados (Render Cron)
 
@@ -186,11 +256,46 @@ el dashboard.
   `python -m scripts.notify_expiring`. Busca tiers `mensual`/`anual` **vigentes** que vencen
   dentro de `TIER_EXPIRY_WARNING_DAYS` (default **10**) y **sin aviso previo**
   (`UserTier.expiry_warning_sent_at IS NULL`), manda `send_tier_expiring_email` (CTA → `/pricing`)
-  y estampa la marca. **Idempotente**: no reenvía al día siguiente. La marca se **limpia**
+  y estampa la marca. **Excluye usuarios con suscripción `authorized` activa** (MP les cobra solo,
+  no necesitan aviso). **Idempotente**: no reenvía al día siguiente. La marca se **limpia**
   (`= None`) al renovar/pagar (`activate_paid_tier`) y al cambiar tier a free (`set_user_tier`),
   así el nuevo período vuelve a avisar (migración `0010`). Flag **`--dry-run`** para listar sin
-  enviar ni estampar. **Costo**: el cron se factura aparte del web, solo por el tiempo que corre
-  (segundos/día → centavos); no consume ni reemplaza la instancia web.
+  enviar ni estampar.
+- **`scripts/cleanup_export_logs.py`** — limpieza de **logs de auditoría de exportaciones** >
+  `export_log_retention_days` (default **180** = 6 meses). Cron **diario** (`schedule: "30 12
+  * * *"` = 12:30 UTC, offset del expiry cron), nombre **`cron-corpo3d-export-cleanup`**. Borra
+  los `ExportLog` de la DB + sus `.txt` de R2 (idempotente: key inexistente = no-op). Los
+  `Payment` **NO se tocan** (quedan para siempre). Chunks de 500. Flag **`--dry-run`**. Env vars:
+  `DATABASE_URL`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`,
+  `SESSION_SECRET` (dummy — `app.config` lo exige).
+- **Costo**: cada cron se factura aparte del web, solo por el tiempo que corre (segundos/día →
+  centavos); no consumen ni reemplazan la instancia web.
+
+**Estado (2026-07-25): DESPLEGADO y PROBADO en prod.** Se promovió `dev`→`main`, el Blueprint
+creó el servicio **`cron-corpo3d-expiry`** y un **"Trigger Run"** manual dio
+`Avisos enviados: 0` + `finished successfully` (0 es OK: no había tiers venciendo en 10 días).
+Ya corre solo cada día a las 12:00 UTC.
+
+- **Env vars del cron = MANUALES.** Es un **servicio aparte**: las vars `sync: false` del bloque
+  cron (`DATABASE_URL`, `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`, `SESSION_SECRET`) **NO se
+  copian del web** — se cargan a mano en el dashboard del cron (Environment). Se copian **iguales**
+  a las del web, salvo `SESSION_SECRET` que puede ser **cualquier random** (el cron no valida
+  sesiones, pero `app/config.py` lo exige al importar o crashea). `ENVIRONMENT` y
+  `TIER_EXPIRY_WARNING_DAYS` van con `value:` fijo en el blueprint (no se tocan). **Si cambia
+  `DATABASE_URL`/`RESEND_API_KEY`, actualizar en los DOS servicios.** (Alternativa no usada:
+  `fromService` con `envVarKey` para heredarlas del web y no duplicar.)
+- **`type: cron`** (NO `cronjob`, que no es un tipo válido → el servicio no se crearía). Ver la
+  spec del blueprint de Render.
+
+**Facturación Render (aprendido 2026-07-25):** Render **NO** tiene un tope/alerta de **gasto
+total** ("avisame/cortá al llegar a $X"): esa feature no existe. El único control es el **spend
+limit del Build Pipeline** (Workspace Settings → Build Pipeline → Edit), que gobierna **solo
+minutos de build/pre-deploy**, no el hosting ni el runtime del cron. Starter build: **$5/1.000
+min, 500 min gratis/mes**. Está en **$0** a propósito → se usan los 500 gratis y, al agotarlos,
+**los builds se frenan** (no cobra de más; ~2-5 min por build → los 500 alcanzan de sobra). El
+hosting es suscripción fija (web Starter ~$7/mes) → gasto predecible, muy por debajo de $20. Un
+tope **duro real** sobre el total solo se logra del lado del **medio de pago** (tarjeta con
+límite).
 
 ## Seguridad — invariantes a NO romper
 
@@ -311,6 +416,21 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
 
 ## TODO / pendiente
 
+- **Eliminar `POST /exports/attempts/use` (deprecated 2026-07-31): PENDIENTE.** Lo reemplazó
+  `POST /exports/download` (ver "Exportaciones — gate de descarga"). Se dejó vivo para no
+  romper el front ya desplegado mientras se promueve el cambio. **Orden de despliegue**:
+  (1) backend a `main` con los dos endpoints, (2) front a prod con el flujo nuevo, (3) recién
+  entonces borrar el endpoint + `consume()`/`useAttempt()` en `3D/`.
+- **Watermark del PNG: sigue decidiéndose client-side** (`can('cleanImageExport')` en el
+  front), así que un override podría subir un PNG sin marca. El PDF sí quedó cerrado
+  server-side. Si molesta, re-watermarkear el PNG en el backend (Pillow) dentro de
+  `/exports/download`.
+- **Exports secundarios sin gate server-side**: la placa DXF/SVG (`PlatePanel`) y el PNG de
+  montaje (`FacadeMockup`) se descargan directo del cliente, gateados sólo por `can()`. Son
+  features pagas sin contador; si se quieren cerrar, pasarlos por `/exports/download`.
+- **Latencia del export**: ahora se suben varios MB de STL al backend. Con Render en Oregon
+  agrega segundos; se mitiga con la migración de región ya planificada (ver TODO de
+  co-ubicación Render/Neon en el `CLAUDE.md` raíz).
 - **Correo — Gmail "Enviar como" (Parte D del setup de correo): PENDIENTE.** Configurar en Gmail
   el "Enviar como" para **responder** desde `info@`/`support@`/`contacto@` (que el cliente vea la
   respuesta desde la direccion de la empresa, no desde el Gmail personal). Datos del SMTP de
@@ -333,8 +453,6 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   se convirtieron de `.webp` porque varios clientes de email no renderizan webp). Copia fuente de
   los PNG en `app/mailing/assets/`. **Pendiente visual**: verificar el render real en Gmail/Outlook
   una vez deployados los PNG en `corpolab3d.com/logo/` (el front tiene que estar publicado).
-- Conectar el frontend Nuxt (página `/login`, middleware de auth, composable `useAuth`,
-  capa de servicio con `credentials: "include"` y el fetching nativo de Nuxt 4).
 - Limpieza de filas vencidas (job periódico o `DELETE` de paso en login/signup): aplica a
   `sessions`, `password_reset_tokens`, `login_otps` y `pending_registrations` (todas guardan
   `expires_at`). Se resuelve con un `DELETE ... WHERE expires_at < now()`; **NO** justifica traer

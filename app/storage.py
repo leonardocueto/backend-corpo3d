@@ -125,3 +125,31 @@ def delete_keys(*keys: str) -> None:
     c = _client()
     for key in keys:
         c.delete_object(Bucket=settings.r2_bucket, Key=key)
+
+
+# ---- Export audit logs ----
+
+import logging as _log
+
+_export_log_logger = _log.getLogger("storage.export_log")
+
+
+def put_export_log(r2_key: str, content: str) -> None:
+    """Sube un .txt de auditoria a R2. Corre en BackgroundTask; swallows errors
+    (el ExportLog en DB es la fuente de verdad; el .txt es best-effort)."""
+    try:
+        _client().put_object(
+            Bucket=settings.r2_bucket,
+            Key=r2_key,
+            Body=content.encode("utf-8"),
+            ContentType="text/plain; charset=utf-8",
+        )
+    except Exception as exc:
+        _export_log_logger.error("Export log upload failed %s: %s", r2_key, exc)
+
+
+def delete_export_logs(keys: list[str]) -> None:
+    """Borra batch de .txt de auditoria de R2. Idempotente (key inexistente = no-op)."""
+    c = _client()
+    for key in keys:
+        c.delete_object(Bucket=settings.r2_bucket, Key=key)

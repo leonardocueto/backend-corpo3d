@@ -89,3 +89,28 @@ services:
         sync: false
       - key: TIER_EXPIRY_WARNING_DAYS
         value: "10"
+
+  # Cron Job: limpieza de export logs viejos (> 6 meses). Borra ExportLog de la
+  # DB + los .txt de R2. Los Payment NO se tocan. Idempotente.
+  - type: cron
+    name: cron-corpo3d-export-cleanup
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    schedule: "30 12 * * *"   # diario 12:30 UTC (30 min offset del expiry cron)
+    dockerCommand: python -m scripts.cleanup_export_logs
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SESSION_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false

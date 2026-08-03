@@ -9,6 +9,8 @@ pydantic-settings>=2.4
 pydantic[email]>=2.9
 slowapi>=0.1.9
 httpx>=0.27
+# Multipart (POST /exports/download recibe los archivos del export por FormData).
+python-multipart>=0.0.9
 # Templates de emails transaccionales (app/mailing): header/footer + extends/include.
 jinja2>=3.1
 boto3>=1.34

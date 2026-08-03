@@ -140,3 +140,76 @@ def send_tier_expiring_email(
         renew_link=renew_link,
     )
     _send(to_email, "Tu plan está por vencer - CorpoLab 3D", html)
+
+
+# --- Suscripciones (MP Preapproval) ---
+
+
+def send_subscription_activated_email(
+    to_email: str, plan_label: str, amount: str, currency: str
+) -> None:
+    if not settings.resend_api_key:
+        logger.warning("[DEV] Subscription activated email para %s (%s)", to_email, plan_label)
+        return
+    html = render_email(
+        "subscription_activated.html",
+        plan_label=plan_label,
+        amount=amount,
+        currency=currency,
+        app_link=f"{settings.frontend_url.rstrip('/')}/editor",
+    )
+    _send(to_email, "Suscripción activada - CorpoLab 3D", html)
+
+
+def send_subscription_cancelled_email(to_email: str, plan_label: str) -> None:
+    if not settings.resend_api_key:
+        logger.warning("[DEV] Subscription cancelled email para %s (%s)", to_email, plan_label)
+        return
+    html = render_email(
+        "subscription_cancelled.html",
+        plan_label=plan_label,
+        reactivate_link=f"{settings.frontend_url.rstrip('/')}/pricing",
+    )
+    _send(to_email, "Suscripción cancelada - CorpoLab 3D", html)
+
+
+def send_subscription_paused_email(to_email: str, plan_label: str) -> None:
+    if not settings.resend_api_key:
+        logger.warning("[DEV] Subscription paused email para %s (%s)", to_email, plan_label)
+        return
+    html = render_email(
+        "subscription_paused.html",
+        plan_label=plan_label,
+    )
+    _send(to_email, "Suscripción pausada - CorpoLab 3D", html)
+
+
+def send_subscription_charge_failed_email(to_email: str, plan_label: str) -> None:
+    if not settings.resend_api_key:
+        logger.warning("[DEV] Subscription charge failed email para %s (%s)", to_email, plan_label)
+        return
+    html = render_email(
+        "subscription_charge_failed.html",
+        plan_label=plan_label,
+    )
+    _send(to_email, "No pudimos cobrar tu suscripción - CorpoLab 3D", html)
+
+
+def send_withdrawal_request_email(
+    customer_name: str, customer_email: str, reason: str
+) -> None:
+    """Notifica al admin sobre una solicitud de arrepentimiento (Ley 24.240 art. 34).
+    Se envia a info@corpolab3d.com (no al cliente)."""
+    if not settings.resend_api_key:
+        logger.warning(
+            "[DEV] Withdrawal request de %s (%s): %s",
+            customer_name, customer_email, reason,
+        )
+        return
+    html = render_email(
+        "withdrawal_request.html",
+        customer_name=customer_name,
+        customer_email=customer_email,
+        reason=reason,
+    )
+    _send("info@corpolab3d.com", f"Solicitud de arrepentimiento - {customer_name}", html)

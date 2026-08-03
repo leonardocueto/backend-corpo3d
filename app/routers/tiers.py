@@ -8,12 +8,13 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
 from app.deps import require_admin
-from app.models import User, UserTier
+from app.models import Subscription, User, UserTier
 from app.schemas import SetTierIn, UserTierOut
 
-# Tiers de usuario. `free` = limite normal (3 intentos / 24h); `mensual`/`anual`
-# = exportaciones ilimitadas mientras el pago no haya vencido. El vencimiento se
-# evalua al leer (hora del servidor); un pago vencido revierte a free solo.
+# Tiers de usuario. Autoridad dual: suscripcion MP activa (primario) +
+# `expires_at` como safety net (fallback para legacy one-time y webhook que
+# no llega). `free` = limite normal (3 intentos / 24h); `mensual`/`anual`
+# = exportaciones ilimitadas.
 router = APIRouter(prefix="/tiers", tags=["tiers"])
 
 PAID_TIERS = {"mensual", "anual"}
@@ -53,17 +54,55 @@ def sync_user_tier(db: DbSession, user: User, now: datetime) -> "UserTier | None
 
 
 def user_is_unlimited(db: DbSession, user: User, now: datetime) -> bool:
-    """True si el usuario no tiene limite de exportaciones: admin, o tier pago
-    vigente. Fuente unica de verdad del concepto 'ilimitado'. De paso sincroniza
-    (degrada) un tier vencido."""
+    """True si el usuario no tiene limite de exportaciones: admin, suscripcion
+    activa (primario), o tier pago vigente por expires_at (fallback legacy +
+    safety net). Fuente unica de verdad del concepto 'ilimitado'."""
     if user.is_admin:
         return True
     tier = sync_user_tier(db, user, now)
+    if tier and tier.subscription_id:
+        sub = db.get(Subscription, tier.subscription_id)
+        if sub and sub.mp_status == "authorized":
+            return True
     return tier_is_unlimited(tier, now)
 
 
 def expiry_for(tier_name: str, now: datetime) -> datetime:
     return now + TIER_DURATION[tier_name]
+
+
+def activate_subscription_tier(
+    db: DbSession,
+    user_id: uuid.UUID,
+    plan: str,
+    subscription_id: uuid.UUID,
+    now: datetime,
+) -> UserTier:
+    """Activa un tier desde una suscripcion. Como activate_paid_tier pero ademas
+    linkea la suscripcion activa."""
+    tier = _get_or_create_locked(db, user_id)
+    tier.tier = plan
+    tier.paid_at = now
+    tier.expires_at = expiry_for(plan, now)
+    tier.subscription_id = subscription_id
+    tier.expiry_warning_sent_at = None
+    return tier
+
+
+def deactivate_subscription_tier(
+    db: DbSession, user_id: uuid.UUID,
+) -> "UserTier | None":
+    """Revierte el tier a free cuando la suscripcion se pausa/cancela. Mantiene
+    paid_at/expires_at como historial."""
+    tier = db.scalar(
+        select(UserTier).where(UserTier.user_id == user_id).with_for_update()
+    )
+    if tier is None:
+        return None
+    tier.tier = "free"
+    tier.subscription_id = None
+    tier.expiry_warning_sent_at = None
+    return tier
 
 
 def activate_paid_tier(
