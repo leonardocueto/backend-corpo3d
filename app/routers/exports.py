@@ -6,6 +6,8 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 
+from PIL import Image, ImageDraw, ImageFont
+
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -129,6 +131,30 @@ def _consume_attempt(db: DbSession, user_id, now: datetime) -> ExportWindow:
 
 
 
+WATERMARK_TEXT = "CorpoLab 3D"
+
+
+def _watermark_png(data: bytes) -> bytes:
+    """Estampa el watermark en un PNG para cuentas free. Estilo identico al del
+    front (semi-transparente, bottom-right, 4% de la altura)."""
+    img = Image.open(io.BytesIO(data)).convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    fs = round(img.height * 0.04)
+    font = ImageFont.load_default(size=fs)
+    draw.text(
+        (img.width - fs, img.height - fs),
+        WATERMARK_TEXT,
+        fill=(255, 255, 255, 140),
+        font=font,
+        anchor="rb",
+    )
+    img = Image.alpha_composite(img, overlay)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _safe_zip_name(raw: str) -> str:
     """Nombre de archivo del ZIP saneado desde el nombre del proyecto."""
     name = re.sub(r"[^A-Za-z0-9_-]+", "-", raw.strip()).strip("-") or "export"
@@ -199,6 +225,8 @@ def download_export(
         # con el flag `unlimited` forzado en el cliente tampoco la consigue).
         if path.lower().endswith(".pdf") and not unlimited:
             continue
+        if path.lower().endswith(".png") and not unlimited:
+            content = _watermark_png(content)
         entries.append((path, content))
 
     if not entries:

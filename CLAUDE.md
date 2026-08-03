@@ -174,7 +174,9 @@ generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
   el modal de upsell y no el de "sin intentos"); (2) sanitización del payload (**antes** de
   debitar, así un 4xx no consume intento): sin traversal ni paths absolutos, extensiones en
   `ALLOWED_EXPORT_EXTENSIONS`, tope `MAX_EXPORT_FILES`/`MAX_EXPORT_BYTES`; (3) **filtro del
-  PDF** para cuentas free (la ficha técnica es feature paga); (4) free → `_consume_attempt`.
+  PDF** para cuentas free (la ficha técnica es feature paga); (3b) **watermark del PNG** para
+  cuentas free (Pillow: `_watermark_png`, semi-transparente bottom-right, 4% de la altura;
+  el front también aplica el suyo — el backend refuerza); (4) free → `_consume_attempt`.
 - **`_consume_attempt(db, user_id, now)`**: descuenta bajo `SELECT ... FOR UPDATE` **sin
   commitear** — el commit ocurre recién con el ZIP ya armado, así el debit y la entrega son
   **atómicos** (si el armado falla, el rollback devuelve el intento).
@@ -423,10 +425,9 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
 
 - ~~Eliminar `POST /exports/attempts/use` (deprecated 2026-07-31)~~ **HECHO (2026-08-03).**
   Endpoint y dead code del front (`useAttempt()`, `consume()`) eliminados.
-- **Watermark del PNG: sigue decidiéndose client-side** (`can('cleanImageExport')` en el
-  front), así que un override podría subir un PNG sin marca. El PDF sí quedó cerrado
-  server-side. Si molesta, re-watermarkear el PNG en el backend (Pillow) dentro de
-  `/exports/download`.
+- ~~Watermark del PNG client-side bypasseable~~ **HECHO (2026-08-03).** El backend
+  re-watermarkea el PNG con Pillow para cuentas free (`_watermark_png` en `exports.py`).
+  El front sigue aplicando su propio watermark (doble sello, enforcement real en el backend).
 - **Exports secundarios sin gate server-side**: la placa DXF/SVG (`PlatePanel`) y el PNG de
   montaje (`FacadeMockup`) se descargan directo del cliente, gateados sólo por `can()`. Son
   features pagas sin contador; si se quieren cerrar, pasarlos por `/exports/download`.
