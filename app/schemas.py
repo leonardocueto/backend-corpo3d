@@ -277,3 +277,11 @@ class SubscriptionOut(BaseModel):
 
 class CancelSubscriptionOut(BaseModel):
     status: str
+
+
+class WithdrawalRequestIn(BaseModel):
+    """Solicitud de arrepentimiento (Ley 24.240 art. 34)."""
+
+    full_name: str = Field(min_length=1, max_length=255)
+    email: EmailStr
+    reason: str = Field(min_length=1, max_length=2000)

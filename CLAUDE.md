@@ -235,6 +235,11 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
 - **Reembolsos**: se hacen **manual desde el panel de Mercado Pago** (no hay endpoint en el
   backend). Cancelar la suscripción corta los cobros futuros pero no reembolsa el período ya
   cobrado. Decisión de producto (2026-08-01): mantenerlo manual mientras el volumen sea bajo.
+- **Botón de arrepentimiento** (Ley 24.240 art. 34 + Res. 424/2020): `POST /payments/withdrawal`
+  (endpoint **público**, sin sesión, rate-limit 3/min). Recibe `full_name`, `email` y `reason`;
+  manda email a `info@corpolab3d.com` con los datos (template `withdrawal_request.html`). El
+  reembolso se gestiona manual desde el panel de MP. El front tiene la página `/arrepentimiento`
+  con formulario + links en el footer de la landing y en `/pricing`.
 
 **Estado (2026-07-24): legacy PROBADO, suscripciones por probar con credenciales de producción.**
 `MP_ACCESS_TOKEN` y `MP_WEBHOOK_SECRET` se cargan a mano en Render (`sync: false`).

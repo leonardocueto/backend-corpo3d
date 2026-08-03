@@ -193,3 +193,23 @@ def send_subscription_charge_failed_email(to_email: str, plan_label: str) -> Non
         plan_label=plan_label,
     )
     _send(to_email, "No pudimos cobrar tu suscripción - CorpoLab 3D", html)
+
+
+def send_withdrawal_request_email(
+    customer_name: str, customer_email: str, reason: str
+) -> None:
+    """Notifica al admin sobre una solicitud de arrepentimiento (Ley 24.240 art. 34).
+    Se envia a info@corpolab3d.com (no al cliente)."""
+    if not settings.resend_api_key:
+        logger.warning(
+            "[DEV] Withdrawal request de %s (%s): %s",
+            customer_name, customer_email, reason,
+        )
+        return
+    html = render_email(
+        "withdrawal_request.html",
+        customer_name=customer_name,
+        customer_email=customer_email,
+        reason=reason,
+    )
+    _send("info@corpolab3d.com", f"Solicitud de arrepentimiento - {customer_name}", html)

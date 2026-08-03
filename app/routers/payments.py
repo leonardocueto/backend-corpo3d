@@ -29,6 +29,7 @@ from app.email import (
     send_subscription_cancelled_email,
     send_subscription_charge_failed_email,
     send_subscription_paused_email,
+    send_withdrawal_request_email,
 )
 from app.models import Payment, Subscription, User
 from app.ratelimit import limiter
@@ -46,6 +47,7 @@ from app.schemas import (
     SubscribeIn,
     SubscribeOut,
     SubscriptionOut,
+    WithdrawalRequestIn,
 )
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -584,3 +586,21 @@ def _handle_one_time_payment(
     retry_link = f"{settings.frontend_url.rstrip('/')}/pricing"
     background.add_task(send_payment_rejected_email, to_email, label, retry_link)
     return {"status": "ok"}
+
+
+# --- Boton de arrepentimiento (Ley 24.240 art. 34) ---
+
+
+@router.post("/withdrawal", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("3/minute")
+def request_withdrawal(
+    request: Request,
+    payload: WithdrawalRequestIn,
+    background: BackgroundTasks,
+) -> None:
+    background.add_task(
+        send_withdrawal_request_email,
+        payload.full_name,
+        payload.email,
+        payload.reason,
+    )
