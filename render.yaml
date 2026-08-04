@@ -6,7 +6,7 @@
 # secretos / dependen de otros servicios). SESSION_SECRET lo genera Render.
 services:
   - type: web
-    name: backend-corpo3d
+    name: backend-corpolab3d
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
@@ -61,73 +61,6 @@ services:
       - key: R2_BUCKET
         sync: false
 
-  # Cron Job: aviso de vencimiento de tiers pagos. Reusa el MISMO Docker image que el
-  # web; arranca 1 vez por dia, corre el script y termina. Idempotente (marca
-  # expiry_warning_sent_at). "Trigger Run" en el dashboard lo ejecuta on-demand.
-  - type: cron
-    name: cron-corpo3d-expiry
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    schedule: "0 12 * * *"   # diario 12:00 UTC (~09:00 AR)
-    dockerCommand: python -m scripts.notify_expiring
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: SESSION_SECRET
-        # El script importa app.config (Settings exige SESSION_SECRET aunque el job no
-        # use sesiones). Cualquier valor sirve aca; se carga a mano.
-        sync: false
-      - key: DATABASE_URL
-        sync: false
-      - key: FRONTEND_URL
-        # Base del link "Renovar mi plan" del email.
-        sync: false
-      - key: EMAIL_FROM
-        sync: false
-      - key: RESEND_API_KEY
-        sync: false
-      - key: TIER_EXPIRY_WARNING_DAYS
-        value: "10"
-
-  # Cron Job: limpieza de export logs viejos (> 6 meses). Borra ExportLog de la
-  # DB + los .txt de R2. Los Payment NO se tocan. Idempotente.
-  - type: cron
-    name: cron-corpo3d-export-cleanup
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    schedule: "30 13 * * 0"   # semanal domingos 13:30 UTC (~10:30 AR)
-    dockerCommand: python -m scripts.cleanup_export_logs
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: SESSION_SECRET
-        sync: false
-      - key: DATABASE_URL
-        sync: false
-      - key: R2_ACCOUNT_ID
-        sync: false
-      - key: R2_ACCESS_KEY_ID
-        sync: false
-      - key: R2_SECRET_ACCESS_KEY
-        sync: false
-      - key: R2_BUCKET
-        sync: false
-
-  # Cron Job: limpieza de filas vencidas (sessions, password_reset_tokens,
-  # login_otps, pending_registrations). Solo toca DB, no R2 ni mails.
-  - type: cron
-    name: cron-corpo3d-expired-cleanup
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    schedule: "0 13 * * 0"   # semanal domingos 13:00 UTC (~10:00 AR)
-    dockerCommand: python -m scripts.cleanup_expired
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: SESSION_SECRET
-        sync: false
-      - key: DATABASE_URL
-        sync: false
+  # Los Cron Jobs (expiry, export-cleanup, expired-cleanup) se crean A MANO en el
+  # dashboard de Render (no via blueprint) para evitar que se auto-recreen en la
+  # region default al deployar. Config de cada uno documentada en CLAUDE.md.
