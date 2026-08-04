@@ -6,6 +6,8 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 
+from PIL import Image, ImageDraw, ImageFont
+
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -128,30 +130,29 @@ def _consume_attempt(db: DbSession, user_id, now: datetime) -> ExportWindow:
     return win
 
 
-@router.post("/attempts/use", response_model=ExportAttemptsOut)
-def use_attempt(
-    user: User = Depends(get_current_user), db: DbSession = Depends(get_db)
-) -> ExportAttemptsOut:
-    """DEPRECATED: lo reemplaza POST /exports/download (que valida, descuenta y
-    entrega el ZIP en una sola request; este endpoint era cooperativo, un cliente
-    modificado podia no llamarlo). Se mantiene mientras el front viejo siga en
-    prod; eliminar cuando el flujo nuevo este desplegado.
 
-    Valida y consume un intento. Ilimitado (admin o tier pago vigente): no
-    toca la tabla. Free: descuenta 1 si quedan; si no, 403."""
-    now = datetime.now(timezone.utc)
-    if user_is_unlimited(db, user, now):
-        return _admin_response()
+WATERMARK_TEXT = "CorpoLab 3D"
 
-    win = _consume_attempt(db, user.id, now)
-    db.commit()
-    db.refresh(win)
-    return ExportAttemptsOut(
-        limit=DAILY_LIMIT,
-        remaining=win.remaining_attempts,
-        unlimited=False,
-        reset_at=win.window_start + WINDOW,
+
+def _watermark_png(data: bytes) -> bytes:
+    """Estampa el watermark en un PNG para cuentas free. Estilo identico al del
+    front (semi-transparente, bottom-right, 4% de la altura)."""
+    img = Image.open(io.BytesIO(data)).convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    fs = round(img.height * 0.04)
+    font = ImageFont.load_default(size=fs)
+    draw.text(
+        (img.width - fs, img.height - fs),
+        WATERMARK_TEXT,
+        fill=(255, 255, 255, 140),
+        font=font,
+        anchor="rb",
     )
+    img = Image.alpha_composite(img, overlay)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _safe_zip_name(raw: str) -> str:
@@ -224,6 +225,8 @@ def download_export(
         # con el flag `unlimited` forzado en el cliente tampoco la consigue).
         if path.lower().endswith(".pdf") and not unlimited:
             continue
+        if path.lower().endswith(".png") and not unlimited:
+            content = _watermark_png(content)
         entries.append((path, content))
 
     if not entries:

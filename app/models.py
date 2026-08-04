@@ -247,8 +247,8 @@ class Payment(Base):
     __tablename__ = "payments"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
     )
     plan: Mapped[str] = mapped_column(String(16), nullable=False)
     mp_payment_id: Mapped[str | None] = mapped_column(
@@ -263,7 +263,7 @@ class Payment(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    user: Mapped["User"] = relationship()
+    user: Mapped["User | None"] = relationship()
 
 
 class ExportLog(Base):
@@ -274,8 +274,8 @@ class ExportLog(Base):
     __tablename__ = "export_logs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
     )
     payment_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("payments.id", ondelete="SET NULL"), index=True, nullable=True
@@ -285,4 +285,4 @@ class ExportLog(Base):
         DateTime(timezone=True), server_default=func.now(), index=True, nullable=False
     )
 
-    user: Mapped["User"] = relationship()
+    user: Mapped["User | None"] = relationship()

@@ -24,3 +24,5 @@ mercadopago>=2.2
 # Login con Google (OIDC): verifica el ID token. El extra [requests] trae el
 # transporte que google-auth usa para bajar los certs publicos de Google.
 google-auth[requests]>=2.0
+# Watermark del PNG de referencia server-side (cuentas free) en /exports/download.
+Pillow>=10.4

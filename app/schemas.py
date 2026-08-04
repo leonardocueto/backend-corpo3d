@@ -236,8 +236,8 @@ class PaymentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    user_id: uuid.UUID
-    user_email: str
+    user_id: uuid.UUID | None
+    user_email: str | None
     user_full_name: str | None
     plan: str
     status: str
