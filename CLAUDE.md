@@ -248,51 +248,49 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
 
 ## Jobs programados (Render Cron)
 
-Tareas que corren **fuera** del proceso web, en un **Cron Job de Render** (`type: cron` en
-`render.yaml`): reusa el **mismo Docker image**, arranca en horario, corre un comando y termina
-(no es un scheduler in-process; no toca el web). Se ejecutan on-demand con **"Trigger Run"** en
-el dashboard.
+Tareas que corren **fuera** del proceso web, en un **Cron Job de Render**: reusa el **mismo
+Docker image**, arranca en horario, corre un comando y termina (no es un scheduler in-process;
+no toca el web). Se ejecutan on-demand con **"Trigger Run"** en el dashboard. **Creados a mano
+en el dashboard** (no via blueprint/`render.yaml` — se sacaron del yaml el 2026-08-04 para
+evitar que Render los auto-recree en la región default al deployar). Todos en **Ohio (US East)**.
 
 - **`scripts/notify_expiring.py`** — aviso de **vencimiento próximo** de tiers pagos. Cron
-  **diario** (`schedule: "0 12 * * *"` = 12:00 UTC ≈ 09:00 AR), comando
-  `python -m scripts.notify_expiring`. Busca tiers `mensual`/`anual` **vigentes** que vencen
-  dentro de `TIER_EXPIRY_WARNING_DAYS` (default **10**) y **sin aviso previo**
-  (`UserTier.expiry_warning_sent_at IS NULL`), manda `send_tier_expiring_email` (CTA → `/pricing`)
-  y estampa la marca. **Excluye usuarios con suscripción `authorized` activa** (MP les cobra solo,
-  no necesitan aviso). **Idempotente**: no reenvía al día siguiente. La marca se **limpia**
-  (`= None`) al renovar/pagar (`activate_paid_tier`) y al cambiar tier a free (`set_user_tier`),
-  así el nuevo período vuelve a avisar (migración `0010`). Flag **`--dry-run`** para listar sin
-  enviar ni estampar.
+  **diario** (`schedule: "0 12 * * *"` = 12:00 UTC ≈ 09:00 AR), nombre en Render
+  **`cron-corpolab3d-tier-expiry`**, comando `python -m scripts.notify_expiring`. Busca tiers
+  `mensual`/`anual` **vigentes** que vencen dentro de `TIER_EXPIRY_WARNING_DAYS` (default **10**)
+  y **sin aviso previo** (`UserTier.expiry_warning_sent_at IS NULL`), manda
+  `send_tier_expiring_email` (CTA → `/pricing`) y estampa la marca. **Excluye usuarios con
+  suscripción `authorized` activa** (MP les cobra solo, no necesitan aviso). **Idempotente**: no
+  reenvía al día siguiente. La marca se **limpia** (`= None`) al renovar/pagar
+  (`activate_paid_tier`) y al cambiar tier a free (`set_user_tier`), así el nuevo período vuelve
+  a avisar (migración `0010`). Flag **`--dry-run`** para listar sin enviar ni estampar.
 - **`scripts/cleanup_export_logs.py`** — limpieza de **logs de auditoría de exportaciones** >
   `export_log_retention_days` (default **180** = 6 meses). Cron **semanal** (`schedule: "30 13
-  * * 0"` = domingos 13:30 UTC ≈ 10:30 AR), nombre **`cron-corpo3d-export-cleanup`**. Borra
-  los `ExportLog` de la DB + sus `.txt` de R2 (idempotente: key inexistente = no-op). Los
-  `Payment` **NO se tocan** (quedan para siempre). Chunks de 500. Flag **`--dry-run`**. Env vars:
-  `DATABASE_URL`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`,
-  `SESSION_SECRET` (dummy — `app.config` lo exige).
+  * * 0"` = domingos 13:30 UTC ≈ 10:30 AR), nombre en Render
+  **`cron-corpolab3d-export-cleanup`**. Borra los `ExportLog` de la DB + sus `.txt` de R2
+  (idempotente: key inexistente = no-op). Los `Payment` **NO se tocan** (quedan para siempre).
+  Chunks de 500. Flag **`--dry-run`**. Env vars: `DATABASE_URL`, `R2_ACCOUNT_ID`,
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `SESSION_SECRET` (dummy —
+  `app.config` lo exige).
 - **`scripts/cleanup_expired.py`** — limpieza de **filas vencidas** de tablas efímeras:
   `sessions`, `password_reset_tokens`, `login_otps`, `pending_registrations` (todas con
   `expires_at < now()`). Cron **semanal** (`schedule: "0 13 * * 0"` = domingos 13:00 UTC ≈
-  10:00 AR), nombre **`cron-corpo3d-expired-cleanup`**. No toca R2 ni manda mails. Flag
-  **`--dry-run`**. Env vars: `DATABASE_URL`, `SESSION_SECRET` (dummy).
+  10:00 AR), nombre en Render **`cron-corpolab3d-expired-tokens-cleanup`**. No toca R2 ni manda
+  mails. Flag **`--dry-run`**. Env vars: `DATABASE_URL`, `SESSION_SECRET` (dummy).
 - **Costo**: cada cron se factura aparte del web, solo por el tiempo que corre (segundos/día →
   centavos); no consumen ni reemplazan la instancia web.
 
-**Estado:** `cron-corpo3d-expiry` **DESPLEGADO y PROBADO** (2026-07-25, `Avisos enviados: 0` +
-`finished successfully`). `cron-corpo3d-export-cleanup` **DESPLEGADO y PROBADO** (2026-08-03,
-`Logs eliminados: 0` + `finished successfully`). `cron-corpo3d-expired-cleanup` pendiente de
-deploy (se crea al promover a `main`).
+**Estado (2026-08-04):** los 3 crons **DESPLEGADOS en Ohio** (migrados desde Oregon junto con el
+web). `cron-corpolab3d-tier-expiry` y `cron-corpolab3d-export-cleanup` probados OK.
+`cron-corpolab3d-expired-tokens-cleanup` desplegado (pendiente de primer Trigger Run con el
+script en `main`).
 
-- **Env vars del cron = MANUALES.** Es un **servicio aparte**: las vars `sync: false` del bloque
-  cron (`DATABASE_URL`, `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`, `SESSION_SECRET`) **NO se
-  copian del web** — se cargan a mano en el dashboard del cron (Environment). Se copian **iguales**
-  a las del web, salvo `SESSION_SECRET` que puede ser **cualquier random** (el cron no valida
-  sesiones, pero `app/config.py` lo exige al importar o crashea). `ENVIRONMENT` y
-  `TIER_EXPIRY_WARNING_DAYS` van con `value:` fijo en el blueprint (no se tocan). **Si cambia
-  `DATABASE_URL`/`RESEND_API_KEY`, actualizar en los DOS servicios.** (Alternativa no usada:
-  `fromService` con `envVarKey` para heredarlas del web y no duplicar.)
-- **`type: cron`** (NO `cronjob`, que no es un tipo válido → el servicio no se crearía). Ver la
-  spec del blueprint de Render.
+- **Env vars del cron = MANUALES.** Es un **servicio aparte**: las vars (`DATABASE_URL`,
+  `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`, `SESSION_SECRET`) **NO se copian del web** — se
+  cargan a mano en el dashboard del cron (Environment). Se copian **iguales** a las del web, salvo
+  `SESSION_SECRET` que puede ser **cualquier random** (el cron no valida sesiones, pero
+  `app/config.py` lo exige al importar o crashea). **Si cambia `DATABASE_URL`/`RESEND_API_KEY`,
+  actualizar en TODOS los servicios (web + crons).**
 
 **Facturación Render (aprendido 2026-07-25):** Render **NO** tiene un tope/alerta de **gasto
 total** ("avisame/cortá al llegar a $X"): esa feature no existe. El único control es el **spend
@@ -351,7 +349,8 @@ El front debe llamar a la API con `credentials: "include"` para enviar/recibir l
 Topología: visitante → **Cloudflare** (DNS + proxy + WAF) → **Vercel** (front `www.corpolab3d.com`)
 / **Render** (backend `api.corpolab3d.com`). DB en **Neon** (solo accesible por `DATABASE_URL`
 desde Render). Cookie **host-only** (`COOKIE_DOMAIN` ausente a propósito), `COOKIE_SAMESITE=lax`
-(www y api son same-site).
+(www y api son same-site). **Render y Neon co-ubicados en Ohio (US East)** desde 2026-08-04
+(antes: Render Oregon + Neon São Paulo, ~950 ms por endpoint; ahora ~200 ms).
 
 - **Render deploya desde `main`, NO desde `dev`.** `dev` = staging; se promueve con el workflow
   **manual** de GitHub Actions **"Promote dev to main"** (Actions → Run workflow): corre CI sobre
@@ -434,9 +433,9 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   placa, foto de montaje), gateados por `can()` (fail-closed en prod). No justifica proxearlos
   por el backend: el usuario ya tiene los datos en memoria tras "Calcular placa" / abrir el
   modal.
-- **Latencia del export**: ahora se suben varios MB de STL al backend. Con Render en Oregon
-  agrega segundos; se mitiga con la migración de región ya planificada (ver TODO de
-  co-ubicación Render/Neon en el `CLAUDE.md` raíz).
+- ~~Latencia del export~~ **MITIGADO (2026-08-04)**: Render y Neon migrados a Ohio (US East).
+  La latencia AR↔Ohio (~120 ms) es el mínimo físico; el upload de STL sigue siendo varios MB
+  pero ya no suma el RTT Oregon (~160 ms).
 - **Correo — Gmail "Enviar como" (Parte D del setup de correo): PENDIENTE.** Configurar en Gmail
   el "Enviar como" para **responder** desde `info@`/`support@`/`contacto@` (que el cliente vea la
   respuesta desde la direccion de la empresa, no desde el Gmail personal). Datos del SMTP de

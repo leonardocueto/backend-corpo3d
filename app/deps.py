@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session as DbSession
+from sqlalchemy.orm import Session as DbSession, joinedload
 
 from app.config import settings
 from app.database import get_db
@@ -18,7 +18,9 @@ def get_current_user(request: Request, db: DbSession = Depends(get_db)) -> User:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
 
     session = db.scalar(
-        select(Session).where(Session.token_hash == hash_session_token(token))
+        select(Session)
+        .options(joinedload(Session.user))
+        .where(Session.token_hash == hash_session_token(token))
     )
     if session is None or session.revoked_at is not None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Sesion invalida")
@@ -26,7 +28,7 @@ def get_current_user(request: Request, db: DbSession = Depends(get_db)) -> User:
     if session.expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Sesion expirada")
 
-    user = db.get(User, session.user_id)
+    user = session.user
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Usuario inactivo")
 
