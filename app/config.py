@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     otp_enabled: bool = False
     otp_minutes: int = 3                          # vida del codigo OTP (y cooldown de reenvio)
     otp_max_attempts: int = 5                     # intentos de verificacion antes de invalidar
+    redis_url: str | None = None                  # requerido cuando otp_enabled=True
 
     # Cloudflare R2 (storage de disenos guardados; bucket PRIVADO, S3-compatible).
     # Opcionales: la app arranca sin esto; solo los endpoints /designs los exigen.

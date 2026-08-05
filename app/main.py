@@ -49,4 +49,9 @@ app.include_router(payments.router)
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    result: dict = {"status": "ok"}
+    if settings.redis_url:
+        from app.redis import ping_redis
+
+        result["redis"] = "ok" if ping_redis() else "unreachable"
+    return result

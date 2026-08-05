@@ -22,7 +22,10 @@ from app.email import (
     send_welcome_email,
 )
 from app.google_oauth import GoogleAuthError, verify_google_id_token
-from app.models import LoginOtp, PasswordResetToken, PendingRegistration, Session, User
+from app.models import PasswordResetToken, PendingRegistration, Session, User
+from app.otp import RedisUnavailableError, has_active_otp
+from app.otp import store_otp as redis_store_otp
+from app.otp import verify_otp as redis_verify_otp
 from app.ratelimit import limiter
 from app.routers.tiers import sync_user_tier
 from app.schemas import (
@@ -84,24 +87,11 @@ def _start_session(db: DbSession, user: User, response: Response) -> None:
     _set_session_cookie(response, token)
 
 
-def _issue_login_otp(db: DbSession, user: User, background: BackgroundTasks) -> None:
-    """Emite un OTP de login: invalida los OTP previos sin usar del usuario (un solo
-    codigo activo a la vez), guarda el HMAC del nuevo con vida corta y manda el codigo
-    por email en background (la respuesta no espera al proveedor)."""
-    db.execute(
-        update(LoginOtp)
-        .where(LoginOtp.user_id == user.id, LoginOtp.used_at.is_(None))
-        .values(used_at=datetime.now(timezone.utc))
-    )
+def _issue_login_otp(user: User, background: BackgroundTasks) -> None:
+    """Emite un OTP de login via Redis: invalida el anterior (DEL), guarda el HMAC
+    del nuevo con TTL nativo y manda el codigo por email en background."""
     code = generate_otp()
-    db.add(
-        LoginOtp(
-            user_id=user.id,
-            code_hash=hash_token(code),
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.otp_minutes),
-        )
-    )
-    db.commit()
+    redis_store_otp(user.id, hash_token(code))
     background.add_task(send_login_otp_email, user.email, code)
 
 
@@ -128,11 +118,13 @@ def login(
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
 
     if not settings.otp_enabled:
-        # Sin OTP: login directo (compat con el flujo previo).
         _start_session(db, user, response)
         return LoginResponse(otp_required=False, user=user)
 
-    _issue_login_otp(db, user, background)
+    try:
+        _issue_login_otp(user, background)
+    except RedisUnavailableError:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible")
     return LoginResponse(otp_required=True)
 
 
@@ -144,34 +136,21 @@ def verify_otp(
     response: Response,
     db: DbSession = Depends(get_db),
 ):
-    """Paso 2 del login: consume el OTP y, si es valido, inicia la sesion (cookie).
-    Codigo single-use + corto + con tope de intentos. Respuesta 400 GENERICA: no
-    distingue "no existe" de "vencido" de "incorrecto" (anti-enumeracion)."""
+    """Paso 2 del login: consume el OTP (Redis) y, si es valido, inicia la sesion
+    (cookie en Postgres). Respuesta 400 GENERICA (anti-enumeracion)."""
     invalid = HTTPException(status.HTTP_400_BAD_REQUEST, detail="Codigo invalido o expirado")
 
     user = db.scalar(select(User).where(User.email == payload.email))
     if user is None or not user.is_active:
         raise invalid
 
-    # OTP mas reciente sin usar del usuario (un solo activo a la vez).
-    otp = db.scalar(
-        select(LoginOtp)
-        .where(LoginOtp.user_id == user.id, LoginOtp.used_at.is_(None))
-        .order_by(LoginOtp.created_at.desc())
-    )
-    now = datetime.now(timezone.utc)
-    if otp is None or otp.expires_at <= now or otp.attempts >= settings.otp_max_attempts:
+    try:
+        ok = redis_verify_otp(user.id, hash_token(payload.code))
+    except RedisUnavailableError:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible")
+    if not ok:
         raise invalid
 
-    if otp.code_hash != hash_token(payload.code):
-        # Cuenta el intento fallido; al llegar al tope, el codigo queda inservible.
-        otp.attempts += 1
-        if otp.attempts >= settings.otp_max_attempts:
-            otp.used_at = now  # invalida explicitamente tras agotar los intentos
-        db.commit()
-        raise invalid
-
-    otp.used_at = now
     _start_session(db, user, response)
     return user
 
@@ -188,22 +167,17 @@ def resend_otp(
     Responde SIEMPRE 204, exista o no el email (anti-enumeracion).
 
     Cooldown server-side: NO reenvia si el usuario todavia tiene un codigo ACTIVO
-    (sin usar y sin vencer). Es la validacion real del timer del front (que solo
-    habilita "reenviar" cuando el codigo vence); no se puede saltear manipulando el
-    cliente. Al vencer el codigo actual, el reenvio vuelve a estar disponible."""
+    en Redis (la key existe = codigo vivo). Al expirar el TTL, el reenvio vuelve a
+    estar disponible."""
     user = db.scalar(select(User).where(User.email == payload.email))
     if user is None or not user.is_active:
         return
-    active = db.scalar(
-        select(LoginOtp).where(
-            LoginOtp.user_id == user.id,
-            LoginOtp.used_at.is_(None),
-            LoginOtp.expires_at > datetime.now(timezone.utc),
-        )
-    )
-    if active is not None:
-        return  # 204: hay un codigo vivo, hay que esperar a que venza
-    _issue_login_otp(db, user, background)
+    try:
+        if has_active_otp(user.id):
+            return
+        _issue_login_otp(user, background)
+    except RedisUnavailableError:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible")
 
 
 @router.post("/google", response_model=UserOut)
