@@ -280,10 +280,9 @@ evitar que Render los auto-recree en la región default al deployar). Todos en *
 - **Costo**: cada cron se factura aparte del web, solo por el tiempo que corre (segundos/día →
   centavos); no consumen ni reemplazan la instancia web.
 
-**Estado (2026-08-04):** los 3 crons **DESPLEGADOS en Ohio** (migrados desde Oregon junto con el
-web). `cron-corpolab3d-tier-expiry` y `cron-corpolab3d-export-cleanup` probados OK.
-`cron-corpolab3d-expired-tokens-cleanup` desplegado (pendiente de primer Trigger Run con el
-script en `main`).
+**Estado (2026-08-05):** los 3 crons **DESPLEGADOS en Ohio** (migrados desde Oregon junto con el
+web). Los 3 probados OK (`tier-expiry`, `export-cleanup`, `expired-tokens-cleanup` — este último
+verificado el 2026-08-05: 57 sessions, 7 reset tokens, 25 OTPs, 4 pending registrations eliminados).
 
 - **Env vars del cron = MANUALES.** Es un **servicio aparte**: las vars (`DATABASE_URL`,
   `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`, `SESSION_SECRET`) **NO se copian del web** — se

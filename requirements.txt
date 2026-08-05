@@ -20,3 +20,5 @@ mercadopago>=2.2
 google-auth[requests]>=2.0
 # Watermark del PNG de referencia server-side (cuentas free) en /exports/download.
 Pillow>=10.4
+# Redis (OTP storage): TTL nativo para codigos efimeros, sin tocar Postgres.
+redis>=5.0
