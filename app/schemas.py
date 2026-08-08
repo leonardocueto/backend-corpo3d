@@ -284,4 +284,6 @@ class WithdrawalRequestIn(BaseModel):
 
     full_name: str = Field(min_length=1, max_length=255)
     email: EmailStr
-    reason: str = Field(min_length=1, max_length=2000)
+    # Opcional a proposito: el art. 34 permite revocar SIN justificar. Pedirlo como
+    # requisito bloquearia el ejercicio del derecho.
+    reason: str | None = Field(default=None, max_length=2000)
