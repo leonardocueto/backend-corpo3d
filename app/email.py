@@ -161,6 +161,31 @@ def send_subscription_activated_email(
     _send(to_email, "Suscripción activada - CorpoLab 3D", html)
 
 
+def send_refund_email(
+    to_email: str, plan_label: str, amount: str, currency: str, is_chargeback: bool
+) -> None:
+    """Avisa que la plata volvio (reembolso manual o contracargo) y que la cuenta
+    quedo en free. El caller pasa el monto ya formateado como texto."""
+    if not settings.resend_api_key:
+        logger.warning(
+            "[DEV] Refund email para %s (%s, chargeback=%s)", to_email, plan_label, is_chargeback
+        )
+        return
+    html = render_email(
+        "refund_processed.html",
+        plan_label=plan_label,
+        amount=amount,
+        currency=currency,
+        is_chargeback=is_chargeback,
+        reactivate_link=f"{settings.frontend_url.rstrip('/')}/pricing",
+    )
+    subject = (
+        "Contracargo registrado - CorpoLab 3D" if is_chargeback
+        else "Devolución procesada - CorpoLab 3D"
+    )
+    _send(to_email, subject, html)
+
+
 def send_subscription_cancelled_email(to_email: str, plan_label: str) -> None:
     if not settings.resend_api_key:
         logger.warning("[DEV] Subscription cancelled email para %s (%s)", to_email, plan_label)
