@@ -394,12 +394,12 @@ Registros DNS en Cloudflare (todos **DNS-only** / nube gris; MX y TXT ni se prox
 | Resend | TXT (DKIM) | `resend._domainkey` | `p=MIG...` |
 | Resend | MX | `send` | `feedback-smtp...amazonses.com` (prio 10) |
 | Resend | TXT (SPF) | `send` | `v=spf1 include:amazonses.com ~all` |
-| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=quarantine;` |
+| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=reject;` |
 
 > **No pisar el SPF de la raiz** (Email Routing): el SPF de Resend vive en el subdominio `send`,
 > no en la raiz. Con el dominio verificado en Resend ya **no hay bloqueo tecnico para activar el
 > OTP de login** (`OTP_ENABLED`); esa activacion queda como decision aparte. DMARC en
-> `p=quarantine` (endurecido 2026-08-03; siguiente paso: `p=reject`). El WAF no interviene (el mail va por MX/SMTP, no HTTP).
+> `p=reject` (endurecido a reject 2026-08-06; antes quarantine desde 2026-08-03). El WAF no interviene (el mail va por MX/SMTP, no HTTP).
 
 **Estado (2026-07-24):** recepcion (info/support/soporte/contacto/ventas + catch-all APAGADO →
 las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMAIL_FROM` en Render
@@ -458,21 +458,22 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   los PNG en `app/mailing/assets/`. Verificación visual en Gmail/Outlook **OK** (2026-08-03).
 - ~~Limpieza de filas vencidas~~ **HECHO (2026-08-03)**: `scripts/cleanup_expired.py`, cron
   semanal `cron-corpo3d-expired-cleanup` (ver "Jobs programados").
-- **Redis — cuándo SÍ, cuándo NO (decisión 2026-07-24, a futuro):** hoy **no se usa** y no hace
-  falta (single-instance, "pocos usuarios internos"). Todo el estado efímero (sesiones, tokens de
-  reset, OTP, pending registrations) vive en **Postgres a propósito**, por la **atomicidad
-  transaccional** (ej. `verify-signup` crea el `User` y marca el pending usado en una sola
-  transacción; con Redis se partiría en dos datastores y se perdería). Distinguir los dos roles de
-  Redis para no mezclarlos:
-  - **Store efímero / rate-limit distribuido** → el gatillo real es correr **múltiples instancias**
-    del backend: ahí el `slowapi` en memoria (1 instancia) deja de servir y Redis pasa a ser
-    necesario para el rate-limit compartido (y opcionalmente sesiones/tokens, asumiendo el
-    trade-off de atomicidad). Mientras sea 1 instancia, no aporta.
-  - **Caché** → solo para respuestas **dinámicas del backend, caras y compartidas** (ej.
-    `GET /plans`, agregados). **NO** para la landing ni contenido estático: la landing es una **SPA
-    estática** servida por **CDN (Vercel) + Cloudflare** en el borde — eso ya es más rápido y
-    barato que Redis. Para público estático/casi-estático, cachear en **Cloudflare/CDN
-    (`Cache-Control`)**, no en Redis.
+- **~~Redis — cuándo SÍ, cuándo NO~~ Redis ACTIVO para OTP (2026-08-05).** Instancia **Render Key
+  Value** (Free, Ohio, `noeviction`, sin persistencia):
+  `redis://red-d9pk198ae00c73f73ic0:6379` (internal URL). **OTP migrado de Postgres a Redis**:
+  los códigos de login viven como hash `otp:{user_id}` con TTL nativo (`otp_minutes * 60`s).
+  Campos: `code_hash` (HMAC-SHA256, 64 hex) + `attempts` (contador). La key expira sola (sin
+  cron), se borra al consumir o agotar intentos. Módulos: `app/redis.py` (conexión singleton,
+  fail-fast si `OTP_ENABLED` sin `REDIS_URL`) + `app/otp.py` (`store_otp`, `verify_otp`,
+  `has_active_otp`; `RedisUnavailableError` → 503 en los endpoints). El modelo `LoginOtp` y la
+  tabla `login_otps` **se conservan** (historial de migraciones) pero ya no reciben filas; el
+  cron `cleanup_expired.py` ya no las limpia. `/health` incluye `"redis": "ok"|"unreachable"`.
+  Env var: `REDIS_URL` (requerida cuando `OTP_ENABLED=true`; sin OTP, no hace falta). El resto
+  del estado efímero (sesiones, tokens de reset, pending registrations) **sigue en Postgres** por
+  atomicidad transaccional. Redis a futuro para:
+  - **Rate-limit distribuido** → gatillo: múltiples instancias del backend (`slowapi` en memoria
+    es single-instance).
+  - **Caché** → solo respuestas dinámicas caras; para estáticos usar CDN (Vercel + Cloudflare).
 - Rate limiting (hecho): `slowapi` por IP en 16 endpoints (`auth.py` login/register/signup/
   OTP/reset, `designs.py` list/write/open/thumb/save/delete); limiter en `app/ratelimit.py`.
   **Keyeado por `CF-Connecting-IP`** (no por `get_remote_address` a secas): detrás de
