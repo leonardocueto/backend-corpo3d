@@ -4,3 +4,4 @@ __pycache__/
 .env
 *.log
 cloudflared.out
+graphify-out/

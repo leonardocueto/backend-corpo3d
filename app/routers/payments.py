@@ -25,6 +25,7 @@ from app.deps import get_current_user, require_admin
 from app.email import (
     send_payment_approved_email,
     send_payment_rejected_email,
+    send_refund_email,
     send_subscription_activated_email,
     send_subscription_cancelled_email,
     send_subscription_charge_failed_email,
@@ -59,6 +60,13 @@ LIST_LIMIT = "60/minute"
 _sdk: "mercadopago.SDK | None" = None
 
 _FREQUENCY = {"mensual": (1, "months"), "anual": (12, "months")}
+
+# Estados de MP en los que la plata VOLVIO al pagador. Disparan la revocacion
+# inmediata del tier (`_apply_refund`), a diferencia de cancelar/pausar, que solo
+# corta cobros futuros y conserva el acceso hasta `expires_at`.
+#   refunded     -> reembolso total (manual desde el panel de MP)
+#   charged_back -> contracargo: el emisor le devolvio la plata al cliente
+_REFUND_STATUSES = ("refunded", "charged_back")
 
 
 def _get_sdk() -> "mercadopago.SDK":
@@ -417,7 +425,14 @@ def _handle_subscription_status(
         db.commit()
         background.add_task(send_subscription_activated_email, to_email, label)
     elif mp_status in ("paused", "cancelled"):
-        deactivate_subscription_tier(db, user.id)
+        # NO se baja el tier aca a proposito: cancelar/pausar corta los cobros
+        # FUTUROS, pero el periodo en curso ya esta cobrado y no se reembolsa, asi
+        # que el usuario conserva el acceso hasta `expires_at` (como cualquier SaaS).
+        # Al vencer, `sync_user_tier` -> `downgrade_if_expired` lo pasa a free solo,
+        # y `user_is_unlimited` deja de verlo ilimitado porque la suscripcion ya no
+        # esta `authorized` y el tier quedo vencido.
+        # La revocacion INMEDIATA queda reservada al reembolso/contracargo
+        # (`_apply_refund`), que es cuando la plata efectivamente vuelve.
         db.commit()
         if mp_status == "paused":
             background.add_task(send_subscription_paused_email, to_email, label)
@@ -426,6 +441,77 @@ def _handle_subscription_status(
     else:
         db.commit()
 
+    return {"status": "ok"}
+
+
+def _apply_refund(
+    payment_data: dict, db: DbSession, background: BackgroundTasks
+) -> dict | None:
+    """Si la plata volvio (reembolso manual desde el panel de MP, o contracargo),
+    revierte el tier del usuario a free EN EL ACTO y marca el `Payment`.
+
+    Devuelve la respuesta del webhook, o `None` si el pago no es un reembolso (y
+    entonces el caller sigue con su flujo normal).
+
+    Se llama ANTES del guard de idempotencia por `mp_payment_id` de los handlers:
+    MP re-notifica el reembolso con el MISMO id de pago, asi que ese guard veria la
+    fila ya existente y cortaria con {"status": "ok"} sin hacer nada. La
+    idempotencia de esta funcion es distinta: mira el ESTADO de la fila, no su
+    existencia, para poder procesar la transicion approved -> refunded una sola vez.
+
+    Ojo: solo cubre reembolsos TOTALES. Un reembolso parcial deja el pago en
+    `approved` con `status_detail=partially_refunded`, no entra aca, y el usuario
+    conserva el tier — que es lo correcto: le devolviste una parte, no todo.
+    """
+    mp_status = payment_data.get("status")
+    if mp_status not in _REFUND_STATUSES:
+        return None
+
+    mp_payment_id = str(payment_data["id"])
+    payment = db.scalar(select(Payment).where(Payment.mp_payment_id == mp_payment_id))
+
+    if payment is not None and payment.status in _REFUND_STATUSES:
+        return {"status": "ok"}  # ya aplicado
+
+    # El `Payment` es el vinculo confiable con el usuario; el external_reference
+    # es el fallback para un pago que nunca llego a registrarse.
+    user_id = payment.user_id if payment is not None else None
+    plan = payment.plan if payment is not None else None
+    if user_id is None:
+        user_id, plan = _parse_external_ref(payment_data.get("external_reference"))
+    if user_id is None:
+        return {"status": "ignored"}
+
+    if payment is not None:
+        payment.status = mp_status
+
+    user = db.get(User, user_id)
+    if user is None:
+        db.commit()
+        return {"status": "ok"}
+
+    # Baja a free y desengancha la suscripcion del tier, asi `user_is_unlimited`
+    # devuelve False aunque la suscripcion siga `authorized` en MP (caso: se
+    # reembolso sin cancelar).
+    deactivate_subscription_tier(db, user.id)
+    db.commit()
+    logger.info(
+        "Pago %s en estado %s: tier del usuario %s revertido a free",
+        mp_payment_id, mp_status, user.id,
+    )
+
+    # Aviso al usuario. Va DESPUES del commit: si el mail falla, la revocacion ya
+    # esta persistida (el `_send` de app/email.py no levanta nunca).
+    amount = payment.amount if payment is not None else payment_data.get("transaction_amount")
+    label = "Mensual" if plan == "mensual" else "Anual" if plan == "anual" else "pago"
+    background.add_task(
+        send_refund_email,
+        user.email,
+        label,
+        f"{int(amount or 0):,}".replace(",", "."),
+        settings.currency_id,
+        mp_status == "charged_back",
+    )
     return {"status": "ok"}
 
 
@@ -439,6 +525,10 @@ def _handle_subscription_payment(
         return {"status": "ignored"}
     payment_data = result["response"]
     mp_status = payment_data.get("status")
+
+    refunded = _apply_refund(payment_data, db, background)
+    if refunded is not None:
+        return refunded
 
     if mp_status not in ("approved", "rejected", "cancelled"):
         return {"status": "ignored"}
@@ -522,6 +612,10 @@ def _handle_one_time_payment(
         return {"status": "ignored"}
     payment_data = result["response"]
     mp_status = payment_data.get("status")
+
+    refunded = _apply_refund(payment_data, db, background)
+    if refunded is not None:
+        return refunded
 
     if mp_status not in ("approved", "rejected", "cancelled"):
         return {"status": "ignored"}

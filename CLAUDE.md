@@ -231,12 +231,32 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   `UserTier.expires_at > now` (fallback para legacy one-time y safety net por webhook que no
   llega). `user_is_unlimited()` chequea ambos: suscripción primero, expiry después.
 - **Coexistencia**: pagos legacy (`subscription_id = NULL`) siguen funcionando por `expires_at`.
-- **Mails de suscripción** (4 templates Jinja2): activated, cancelled, paused, charge_failed.
+- **Mails de suscripción** (5 templates Jinja2): activated, cancelled, paused, charge_failed y
+  **refund_processed** (`send_refund_email`, una sola plantilla que cubre reembolso y contracargo
+  vía el flag `is_chargeback`; se encola DESPUÉS del commit de la revocación).
 - **Mails de resultado (legacy)**: approved → activa tier; rejected/cancelled → registra el
   status + email.
+- **Cancelar ≠ reembolsar (2026-08-09).** Son dos efectos distintos sobre el tier:
+  - **Cancelada o pausada** (`subscription_preapproval`) → corta los cobros **futuros**, pero
+    **el tier pago se conserva hasta `expires_at`**: el período en curso ya se cobró y no se
+    devuelve. `_handle_subscription_status` **no** llama a `deactivate_subscription_tier`; el
+    downgrade lo hace solo `sync_user_tier` → `downgrade_if_expired` cuando vence.
+    `user_is_unlimited` lo sostiene por el fallback `tier_is_unlimited` (la suscripción ya no
+    está `authorized`, pero el tier sigue siendo pago y vigente).
+  - **Reembolsada o con contracargo** (`_apply_refund`, estados `refunded` / `charged_back`) →
+    **revocación inmediata a free**, porque la plata volvió. Marca el `Payment` con el estado
+    nuevo y llama a `deactivate_subscription_tier`, que además desengancha
+    `tier.subscription_id` — así queda revocado incluso si la suscripción sigue `authorized` en
+    MP (caso: se reembolsó sin cancelar).
+  - **`_apply_refund` corre ANTES del guard de idempotencia** por `mp_payment_id` de los dos
+    handlers de pago. Es obligatorio que sea así: MP re-notifica el reembolso con el **mismo**
+    id de pago, y ese guard corta con `{"status": "ok"}` apenas encuentra la fila. Su
+    idempotencia es por **estado** (`payment.status in _REFUND_STATUSES`), no por existencia.
+  - Solo cubre reembolsos **totales**. Uno parcial deja el pago en `approved` con
+    `status_detail=partially_refunded` y el usuario conserva el tier (devolviste una parte).
 - **Reembolsos**: se hacen **manual desde el panel de Mercado Pago** (no hay endpoint en el
-  backend). Cancelar la suscripción corta los cobros futuros pero no reembolsa el período ya
-  cobrado. Decisión de producto (2026-08-01): mantenerlo manual mientras el volumen sea bajo.
+  backend). Decisión de producto (2026-08-01): mantenerlo manual mientras el volumen sea bajo.
+  El webhook del reembolso sí está automatizado (ver arriba): reembolsás en MP y el tier cae solo.
 - **Botón de arrepentimiento** (Ley 24.240 art. 34 + Res. 424/2020): `POST /payments/withdrawal`
   (endpoint **público**, sin sesión, rate-limit 3/min). Recibe `full_name`, `email` y `reason`;
   manda email a `info@corpolab3d.com` con los datos (template `withdrawal_request.html`). El
@@ -394,12 +414,12 @@ Registros DNS en Cloudflare (todos **DNS-only** / nube gris; MX y TXT ni se prox
 | Resend | TXT (DKIM) | `resend._domainkey` | `p=MIG...` |
 | Resend | MX | `send` | `feedback-smtp...amazonses.com` (prio 10) |
 | Resend | TXT (SPF) | `send` | `v=spf1 include:amazonses.com ~all` |
-| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=quarantine;` |
+| Resend | TXT (DMARC) | `_dmarc` | `v=DMARC1; p=reject;` |
 
 > **No pisar el SPF de la raiz** (Email Routing): el SPF de Resend vive en el subdominio `send`,
 > no en la raiz. Con el dominio verificado en Resend ya **no hay bloqueo tecnico para activar el
 > OTP de login** (`OTP_ENABLED`); esa activacion queda como decision aparte. DMARC en
-> `p=quarantine` (endurecido 2026-08-03; siguiente paso: `p=reject`). El WAF no interviene (el mail va por MX/SMTP, no HTTP).
+> `p=reject` (endurecido a reject 2026-08-06; antes quarantine desde 2026-08-03). El WAF no interviene (el mail va por MX/SMTP, no HTTP).
 
 **Estado (2026-07-24):** recepcion (info/support/soporte/contacto/ventas + catch-all APAGADO →
 las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMAIL_FROM` en Render
@@ -421,85 +441,7 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
 
 ## TODO / pendiente
 
-- ~~Eliminar `POST /exports/attempts/use` (deprecated 2026-07-31)~~ **HECHO (2026-08-03).**
-  Endpoint y dead code del front (`useAttempt()`, `consume()`) eliminados.
-- ~~Watermark del PNG client-side bypasseable~~ **HECHO (2026-08-03).** El backend
-  re-watermarkea el PNG con Pillow para cuentas free (`_watermark_png` en `exports.py`).
-  El front sigue aplicando su propio watermark (doble sello, enforcement real en el backend).
-- **Exports secundarios (placa DXF/SVG, montaje PNG): residuo aceptado (2026-08-03).** Se
-  generan 100% client-side (nesting JS + WebGL render); la geometria fabricable (STL/DXF del
-  ZIP) ya esta cerrada por `/exports/download`. Estos exports son presentacionales (layout de
-  placa, foto de montaje), gateados por `can()` (fail-closed en prod). No justifica proxearlos
-  por el backend: el usuario ya tiene los datos en memoria tras "Calcular placa" / abrir el
-  modal.
-- ~~Latencia del export~~ **MITIGADO (2026-08-04)**: Render y Neon migrados a Ohio (US East).
-  La latencia AR↔Ohio (~120 ms) es el mínimo físico; el upload de STL sigue siendo varios MB
-  pero ya no suma el RTT Oregon (~160 ms).
-- **Correo — Gmail "Enviar como" (Parte D del setup de correo): PENDIENTE.** Configurar en Gmail
-  el "Enviar como" para **responder** desde `info@`/`support@`/`contacto@` (que el cliente vea la
-  respuesta desde la direccion de la empresa, no desde el Gmail personal). Datos del SMTP de
-  Resend: servidor `smtp.resend.com`, puerto `465` (SSL), usuario `resend`, contraseña = una
-  **API key de Resend** (conviene una dedicada, ej. `gmail-smtp`, para poder revocarla sola). El
-  codigo de confirmacion de Gmail llega solo porque esos alias ya reenvian al Gmail (Parte A).
-  Repetir por cada direccion. Recepcion + envio ya funcionan; esto es solo para responder-como.
-- **Correo — templates branded de los mails transaccionales: HECHO (2026-07-24).** Sistema de
-  templates en **`app/mailing/`** con **Jinja2** (dep `jinja2` en ambos requirements). Estructura:
-  `render.py` (`render_email(template, **ctx)`, autoescape ON, inyecta `assets_base_url` +
-  `support_email`) + `templates/` con `base.html` (card centrada, tema **claro** CorpoLab) que
-  incluye `header.html` (logo-texto arriba-izq) y `footer.html` (logo-completo abajo-izq +
-  "¿Necesitas ayuda?" + `info@corpolab3d.com`); cada mail **extiende** `base.html`:
-  `reset_password.html`, `signup_verification.html`, `login_otp.html` y (2026-07-25)
-  `welcome.html`, `payment_approved.html`, `payment_rejected.html`, `tier_expiring.html`.
-  `app/email.py` ahora
-  **renderiza con Jinja2** (helper `_send` a Resend; se eliminó el HTML inline y el `str.replace`;
-  se borró `app/templates/otp.html`). **Logos**: los mails apuntan al **CDN del front**
-  (`{FRONTEND_URL}/logo/logo-texto.png` y `logo-completo.png`, PNG servidos por Vercel/Cloudflare;
-  se convirtieron de `.webp` porque varios clientes de email no renderizan webp). Copia fuente de
-  los PNG en `app/mailing/assets/`. Verificación visual en Gmail/Outlook **OK** (2026-08-03).
-- ~~Limpieza de filas vencidas~~ **HECHO (2026-08-03)**: `scripts/cleanup_expired.py`, cron
-  semanal `cron-corpo3d-expired-cleanup` (ver "Jobs programados").
-- **Redis — cuándo SÍ, cuándo NO (decisión 2026-07-24, a futuro):** hoy **no se usa** y no hace
-  falta (single-instance, "pocos usuarios internos"). Todo el estado efímero (sesiones, tokens de
-  reset, OTP, pending registrations) vive en **Postgres a propósito**, por la **atomicidad
-  transaccional** (ej. `verify-signup` crea el `User` y marca el pending usado en una sola
-  transacción; con Redis se partiría en dos datastores y se perdería). Distinguir los dos roles de
-  Redis para no mezclarlos:
-  - **Store efímero / rate-limit distribuido** → el gatillo real es correr **múltiples instancias**
-    del backend: ahí el `slowapi` en memoria (1 instancia) deja de servir y Redis pasa a ser
-    necesario para el rate-limit compartido (y opcionalmente sesiones/tokens, asumiendo el
-    trade-off de atomicidad). Mientras sea 1 instancia, no aporta.
-  - **Caché** → solo para respuestas **dinámicas del backend, caras y compartidas** (ej.
-    `GET /plans`, agregados). **NO** para la landing ni contenido estático: la landing es una **SPA
-    estática** servida por **CDN (Vercel) + Cloudflare** en el borde — eso ya es más rápido y
-    barato que Redis. Para público estático/casi-estático, cachear en **Cloudflare/CDN
-    (`Cache-Control`)**, no en Redis.
-- Rate limiting (hecho): `slowapi` por IP en 16 endpoints (`auth.py` login/register/signup/
-  OTP/reset, `designs.py` list/write/open/thumb/save/delete); limiter en `app/ratelimit.py`.
-  **Keyeado por `CF-Connecting-IP`** (no por `get_remote_address` a secas): detrás de
-  Cloudflare, uvicorn toma el primer valor de `X-Forwarded-For`, que Cloudflare **appendea**
-  (no reescribe) → un atacante que manda su propio `X-Forwarded-For` controla ese valor y
-  saltea el límite. `CF-Connecting-IP` Cloudflare lo **sobrescribe siempre** (no spoofable);
-  con fallback a `get_remote_address` en dev local. Verificado en prod (2026-07-23) que el
-  header sobrevive intacto los **dos** Cloudflares de la cadena (el tuyo + el de Render). En
-  memoria (1 instancia); para multi-instancia haría falta Redis. Complemento en el **borde
-  (HECHO 2026-07-24)**: Rate limiting rule de Cloudflare 5/10s en `/auth/login` (es Rate
-  limiting rule, NO custom rule; con Block plano bloquearías TODOS los logins). Verificado:
-  el backend corta al 6º request (429 slowapi), Cloudflare al 7º (429 error 1015, en el borde).
-- **Login con Google (OIDC): NO implementado / LATENTE.** El código del backend ya existe
-  (`app/google_oauth.py`, endpoint `/auth/google`, migración `0007`, columnas
-  `google_sub`/`auth_provider`) pero no está activo end-to-end: el front no ofrece SSO y sin
-  `GOOGLE_CLIENT_ID` el endpoint responde 401. Queda como base para el día que se active
-  (ver flujo de auth #6). Todos los users hoy son `auth_provider='password'`.
-- **Guard de origen: ACTIVO en prod** (2026-07-23). `ORIGIN_SECRET` cargada en Render;
-  verificado: `/health` directo = 200 · `/auth/me` directo (onrender.com) = 403 · `/auth/me`
-  por Cloudflare (api.corpolab3d.com) = 401 (guard transparente para el tráfico legítimo).
-- **Pagos MercadoPago (Checkout Pro): webhook PROBADO, falta activar producción.** Ver la
-  sección "Pagos (MercadoPago)". La firma HMAC del webhook quedó verificada (la simulación
-  desde el panel de MP da 200). El día que se lance: activar Credenciales de producción en MP,
-  cambiar `MP_ACCESS_TOKEN` al de producción, rotar `MP_WEBHOOK_SECRET` (se filtró en debug) y
-  probar un pago real chico.
-- ~~Servir estáticos desde un bucket~~ **NO NECESARIO (2026-08-03).** El backend NO sirve
-  assets estáticos: los logos PNG de los mails ya se sirven desde el **CDN del frontend**
-  (Vercel + Cloudflare) via `{FRONTEND_URL}/logo/`. Las copias en `app/mailing/assets/` son
-  fuente de respaldo, no se exponen. Si el día de mañana hay assets que el backend deba servir
-  directamente, reconsiderar con un bucket público en R2.
+> **Los TODO viven todos en el `CLAUDE.md` de la raíz** (`../CLAUDE.md` → "TODO / pendiente
+> (repo)"), unificados con los del front. No agregar pendientes acá: se duplican y se
+> desincronizan. Lo que sí va en este archivo es **cómo funciona** el backend; el qué falta,
+> arriba.
