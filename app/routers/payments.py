@@ -25,6 +25,7 @@ from app.deps import get_current_user, require_admin
 from app.email import (
     send_payment_approved_email,
     send_payment_rejected_email,
+    send_refund_email,
     send_subscription_activated_email,
     send_subscription_cancelled_email,
     send_subscription_charge_failed_email,
@@ -443,7 +444,9 @@ def _handle_subscription_status(
     return {"status": "ok"}
 
 
-def _apply_refund(payment_data: dict, db: DbSession) -> dict | None:
+def _apply_refund(
+    payment_data: dict, db: DbSession, background: BackgroundTasks
+) -> dict | None:
     """Si la plata volvio (reembolso manual desde el panel de MP, o contracargo),
     revierte el tier del usuario a free EN EL ACTO y marca el `Payment`.
 
@@ -473,8 +476,9 @@ def _apply_refund(payment_data: dict, db: DbSession) -> dict | None:
     # El `Payment` es el vinculo confiable con el usuario; el external_reference
     # es el fallback para un pago que nunca llego a registrarse.
     user_id = payment.user_id if payment is not None else None
+    plan = payment.plan if payment is not None else None
     if user_id is None:
-        user_id, _plan = _parse_external_ref(payment_data.get("external_reference"))
+        user_id, plan = _parse_external_ref(payment_data.get("external_reference"))
     if user_id is None:
         return {"status": "ignored"}
 
@@ -495,6 +499,19 @@ def _apply_refund(payment_data: dict, db: DbSession) -> dict | None:
         "Pago %s en estado %s: tier del usuario %s revertido a free",
         mp_payment_id, mp_status, user.id,
     )
+
+    # Aviso al usuario. Va DESPUES del commit: si el mail falla, la revocacion ya
+    # esta persistida (el `_send` de app/email.py no levanta nunca).
+    amount = payment.amount if payment is not None else payment_data.get("transaction_amount")
+    label = "Mensual" if plan == "mensual" else "Anual" if plan == "anual" else "pago"
+    background.add_task(
+        send_refund_email,
+        user.email,
+        label,
+        f"{int(amount or 0):,}".replace(",", "."),
+        settings.currency_id,
+        mp_status == "charged_back",
+    )
     return {"status": "ok"}
 
 
@@ -509,7 +526,7 @@ def _handle_subscription_payment(
     payment_data = result["response"]
     mp_status = payment_data.get("status")
 
-    refunded = _apply_refund(payment_data, db)
+    refunded = _apply_refund(payment_data, db, background)
     if refunded is not None:
         return refunded
 
@@ -596,7 +613,7 @@ def _handle_one_time_payment(
     payment_data = result["response"]
     mp_status = payment_data.get("status")
 
-    refunded = _apply_refund(payment_data, db)
+    refunded = _apply_refund(payment_data, db, background)
     if refunded is not None:
         return refunded
 

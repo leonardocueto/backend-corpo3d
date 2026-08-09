@@ -231,7 +231,9 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   `UserTier.expires_at > now` (fallback para legacy one-time y safety net por webhook que no
   llega). `user_is_unlimited()` chequea ambos: suscripción primero, expiry después.
 - **Coexistencia**: pagos legacy (`subscription_id = NULL`) siguen funcionando por `expires_at`.
-- **Mails de suscripción** (4 templates Jinja2): activated, cancelled, paused, charge_failed.
+- **Mails de suscripción** (5 templates Jinja2): activated, cancelled, paused, charge_failed y
+  **refund_processed** (`send_refund_email`, una sola plantilla que cubre reembolso y contracargo
+  vía el flag `is_chargeback`; se encola DESPUÉS del commit de la revocación).
 - **Mails de resultado (legacy)**: approved → activa tier; rejected/cancelled → registra el
   status + email.
 - **Cancelar ≠ reembolsar (2026-08-09).** Son dos efectos distintos sobre el tier:
