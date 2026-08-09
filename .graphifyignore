@@ -1,0 +1,14 @@
+# Graphify — exclusiones extra para el grafo de este repo.
+# Sintaxis .gitignore. Aplica SIEMPRE (incluso con --no-gitignore).
+# __pycache__, *.pyc, .venv y .env ya los cubre .gitignore.
+
+# Salida del propio graphify
+graphify-out/
+
+# Logos PNG de respaldo de los mails (binarios)
+app/mailing/assets/
+
+# Por las dudas: nunca indexar secretos
+.env
+.env.*
+!.env.example

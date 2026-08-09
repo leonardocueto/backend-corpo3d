@@ -1,3 +1,4 @@
 # Los scripts de shell deben tener saltos de linea LF: con CRLF (Windows) el
 # interprete de Alpine falla con "not found" / "bad interpreter".
 *.sh text eol=lf
+graphify-out/graph.json merge=graphify
