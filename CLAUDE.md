@@ -252,18 +252,29 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   vía el flag `is_chargeback`; se encola DESPUÉS del commit de la revocación).
 - **Mails de resultado (legacy)**: approved → activa tier; rejected/cancelled → registra el
   status + email.
-- **Cancelar ≠ reembolsar (2026-08-09).** Son dos efectos distintos sobre el tier:
-  - **Cancelada o pausada** (`subscription_preapproval`) → corta los cobros **futuros**, pero
-    **el tier pago se conserva hasta `expires_at`**: el período en curso ya se cobró y no se
-    devuelve. `_handle_subscription_status` **no** llama a `deactivate_subscription_tier`; el
-    downgrade lo hace solo `sync_user_tier` → `downgrade_if_expired` cuando vence.
-    `user_is_unlimited` lo sostiene por el fallback `tier_is_unlimited` (la suscripción ya no
-    está `authorized`, pero el tier sigue siendo pago y vigente).
+- **Cancelar ≠ reembolsar (2026-08-09; endpoint alineado y auto-cancel en reembolso 2026-08-10).**
+  Son dos efectos distintos sobre el tier:
+  - **Cancelada o pausada** → corta los cobros **futuros**, pero **el tier pago se conserva hasta
+    `expires_at`**: el período en curso ya se cobró y no se devuelve. Vale **tanto** para la
+    cancelación desde el panel de MP (webhook `subscription_preapproval` →
+    `_handle_subscription_status`) **como** para la cancelación desde la app
+    (`POST /payments/cancel-subscription`): **ninguno** llama a `deactivate_subscription_tier`
+    (el endpoint dejó de hacerlo el 2026-08-10, antes bajaba el tier en el acto e iba
+    inconsistente con el webhook). El downgrade lo hace solo `sync_user_tier` →
+    `downgrade_if_expired` cuando vence. `user_is_unlimited` lo sostiene por el fallback
+    `tier_is_unlimited` (la suscripción ya no está `authorized`, pero el tier sigue siendo pago y
+    vigente).
   - **Reembolsada o con contracargo** (`_apply_refund`, estados `refunded` / `charged_back`) →
     **revocación inmediata a free**, porque la plata volvió. Marca el `Payment` con el estado
     nuevo y llama a `deactivate_subscription_tier`, que además desengancha
     `tier.subscription_id` — así queda revocado incluso si la suscripción sigue `authorized` en
-    MP (caso: se reembolsó sin cancelar).
+    MP. **Además cancela la suscripción en MP** (2026-08-10): reembolsar = el cliente se va, así
+    que `_apply_refund` cancela la preapproval (`sdk.preapproval().update(..., cancelled)`) y
+    marca la `Subscription` local `cancelled`, para que **no vuelva a cobrar el mes siguiente**.
+    Ubica la sub por `payment.subscription_id` (fallback: la non-cancelled más reciente del
+    usuario). Es **best-effort**: si el update a MP falla, se loguea pero NO rompe el webhook (la
+    revocación del tier ya está persistida). Un reembolso de pago legacy one-time no tiene sub y
+    salta el bloque.
   - **`_apply_refund` corre ANTES del guard de idempotencia** por `mp_payment_id` de los dos
     handlers de pago. Es obligatorio que sea así: MP re-notifica el reembolso con el **mismo**
     id de pago, y ese guard corta con `{"status": "ok"}` apenas encuentra la fila. Su
@@ -272,7 +283,10 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
     `status_detail=partially_refunded` y el usuario conserva el tier (devolviste una parte).
 - **Reembolsos**: se hacen **manual desde el panel de Mercado Pago** (no hay endpoint en el
   backend). Decisión de producto (2026-08-01): mantenerlo manual mientras el volumen sea bajo.
-  El webhook del reembolso sí está automatizado (ver arriba): reembolsás en MP y el tier cae solo.
+  El webhook del reembolso está automatizado (ver arriba): reembolsás en MP y el tier cae solo
+  **y la suscripción se cancela sola** (2026-08-10) — ya **no** hace falta cancelarla a mano
+  como paso aparte; una sola acción (reembolsar) devuelve la plata, baja el tier y frena la
+  renovación.
 - **Botón de arrepentimiento** (Ley 24.240 art. 34 + Res. 424/2020): `POST /payments/withdrawal`
   (endpoint **público**, sin sesión, rate-limit 3/min). Recibe `full_name`, `email` y `reason`;
   manda email a `info@corpolab3d.com` con los datos (template `withdrawal_request.html`). El
