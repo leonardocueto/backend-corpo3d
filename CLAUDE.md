@@ -459,7 +459,9 @@ las inexistentes rebotan) **probada OK**. Dominio en Resend **verificado**. `EMA
 = `no-reply@corpolab3d.com`. **Envio real VERIFICADO**: un `forgot-password` de prod llego
 `From: no-reply@corpolab3d.com` con **SPF+DKIM+DMARC = PASS**. Frontend actualizado: landing y
 paginas legales apuntan a `contacto@corpolab3d.com` (rama `fix/contacto-emails` mergeada a `dev`).
-**Pendiente** (ver "TODO / pendiente"): Gmail "Enviar como" para responder desde los alias. Los
+**Pendiente** (ver "TODO / pendiente"): Gmail "Enviar como" — hecho para `info@` y `contacto@`
+(2026-08-10), falta `support@`, `soporte@` y `ventas@`. La API key `gmail-smtp` de Resend esta
+en Bitwarden. Los
 templates branded de los mails (header/footer + tema claro, Jinja2 en `app/mailing/`) ya están
 **HECHOS** (2026-07-24); verificación visual en Gmail/Outlook **OK** (2026-08-03).
 
