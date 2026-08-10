@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -21,6 +22,28 @@ PAID_TIERS = {"mensual", "anual"}
 # Duracion de cada tier pago (timedelta, sin dependencia extra; si se quiere
 # mes/año calendario exacto, usar python-dateutil relativedelta).
 TIER_DURATION = {"mensual": timedelta(days=30), "anual": timedelta(days=365)}
+
+
+class PlanCopy(NamedTuple):
+    """Nombres visibles de un plan. Vive aca (y no en el router de pagos) porque el
+    vocabulario de planes es de este modulo: lo usan el payload de MP, los mails
+    transaccionales y el cron de vencimientos."""
+
+    label: str  # "Mensual" / "Anual"
+    period_every: str  # "todos los meses" / "todos los años"
+    period_each: str  # "cada mes" / "cada año"
+
+
+_PLAN_COPY = {
+    "mensual": PlanCopy("Mensual", "todos los meses", "cada mes"),
+    "anual": PlanCopy("Anual", "todos los años", "cada año"),
+}
+
+
+def plan_copy(plan: str | None) -> PlanCopy:
+    """Copy visible del plan; fallback a anual si es desconocido (mismo default que
+    tenian los ternarios que reemplaza)."""
+    return _PLAN_COPY.get(plan or "", _PLAN_COPY["anual"])
 
 
 def tier_is_unlimited(tier: "UserTier | None", now: datetime) -> bool:

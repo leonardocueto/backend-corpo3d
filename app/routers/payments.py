@@ -32,7 +32,8 @@ from app.email import (
     send_subscription_paused_email,
     send_withdrawal_request_email,
 )
-from app.models import Payment, Subscription, User
+from app.mailing.render import format_amount, format_date
+from app.models import Payment, Subscription, User, UserTier
 from app.ratelimit import limiter
 from app.routers.tiers import (
     PAID_TIERS,
@@ -40,6 +41,7 @@ from app.routers.tiers import (
     activate_subscription_tier,
     deactivate_subscription_tier,
     expiry_for,
+    plan_copy,
 )
 from app.schemas import (
     CancelSubscriptionOut,
@@ -204,7 +206,7 @@ def create_subscription(
     freq, freq_type = _FREQUENCY[plan]
     frontend = settings.frontend_url.rstrip("/")
     backend = settings.backend_url.rstrip("/")
-    label = "Mensual" if plan == "mensual" else "Anual"
+    label = plan_copy(plan).label
 
     preapproval_data = {
         "reason": f"CorpoLab 3D - Plan {label}",
@@ -305,10 +307,14 @@ def cancel_subscription(
     # y el tier quedo vencido). La revocacion INMEDIATA queda reservada al
     # reembolso/contracargo (`_apply_refund`), cuando la plata vuelve.
     sub.mp_status = "cancelled"
+
+    tier = db.scalar(select(UserTier).where(UserTier.user_id == user.id))
+    expires_str = format_date(tier.expires_at) if tier else ""
+
     db.commit()
 
-    label = "Mensual" if sub.plan == "mensual" else "Anual"
-    background.add_task(send_subscription_cancelled_email, user.email, label)
+    label = plan_copy(sub.plan).label
+    background.add_task(send_subscription_cancelled_email, user.email, label, expires_str)
     return CancelSubscriptionOut(status="cancelled")
 
 
@@ -325,7 +331,7 @@ def create_checkout(
     price = _price_for(plan)
     frontend = settings.frontend_url.rstrip("/")
     backend = settings.backend_url.rstrip("/")
-    label = "Mensual" if plan == "mensual" else "Anual"
+    label = plan_copy(plan).label
 
     preference = {
         "items": [
@@ -424,13 +430,29 @@ def _handle_subscription_status(
         return {"status": "ok"}
 
     to_email = user.email
-    label = "Mensual" if sub.plan == "mensual" else "Anual"
+    label, period_every, period_each = plan_copy(sub.plan)
     now = datetime.now(timezone.utc)
 
     if mp_status == "authorized":
-        activate_subscription_tier(db, user.id, sub.plan, sub.id, now)
+        tier = activate_subscription_tier(db, user.id, sub.plan, sub.id, now)
+        next_charge_at = format_date(tier.expires_at)
+        # `or {}` y no un default en el .get(): MP puede mandar la clave con null,
+        # y ahi el default no aplica y el .get() encadenado revienta.
+        amount = (
+            (preapproval.get("auto_recurring") or {}).get("transaction_amount")
+            or _price_for(sub.plan)
+        )
         db.commit()
-        background.add_task(send_subscription_activated_email, to_email, label)
+        background.add_task(
+            send_subscription_activated_email,
+            to_email,
+            label,
+            format_amount(amount),
+            settings.currency_id,
+            period_every,
+            period_each,
+            next_charge_at,
+        )
     elif mp_status in ("paused", "cancelled"):
         # NO se baja el tier aca a proposito: cancelar/pausar corta los cobros
         # FUTUROS, pero el periodo en curso ya esta cobrado y no se reembolsa, asi
@@ -440,11 +462,15 @@ def _handle_subscription_status(
         # esta `authorized` y el tier quedo vencido.
         # La revocacion INMEDIATA queda reservada al reembolso/contracargo
         # (`_apply_refund`), que es cuando la plata efectivamente vuelve.
+        tier = db.scalar(select(UserTier).where(UserTier.user_id == user.id))
+        expires_str = format_date(tier.expires_at) if tier else ""
         db.commit()
         if mp_status == "paused":
             background.add_task(send_subscription_paused_email, to_email, label)
         else:
-            background.add_task(send_subscription_cancelled_email, to_email, label)
+            background.add_task(
+                send_subscription_cancelled_email, to_email, label, expires_str
+            )
     else:
         db.commit()
 
@@ -552,7 +578,7 @@ def _apply_refund(
         send_refund_email,
         user.email,
         label,
-        f"{int(amount or 0):,}".replace(",", "."),
+        format_amount(int(amount or 0)),
         settings.currency_id,
         mp_status == "charged_back",
     )
@@ -598,7 +624,7 @@ def _handle_subscription_payment(
 
     amount = int(payment_data.get("transaction_amount") or 0)
     to_email = user.email
-    label = "Mensual" if plan == "mensual" else "Anual"
+    label, period_every, period_each = plan_copy(plan)
 
     db.add(
         Payment(
@@ -611,15 +637,16 @@ def _handle_subscription_payment(
         )
     )
 
+    expires_str = ""
     if mp_status == "approved" and sub:
         now = datetime.now(timezone.utc)
-        from app.models import UserTier
         tier = db.scalar(
             select(UserTier).where(UserTier.user_id == user_id).with_for_update()
         )
         if tier and tier.subscription_id == sub.id:
             tier.expires_at = expiry_for(plan, now)
             tier.expiry_warning_sent_at = None
+            expires_str = format_date(tier.expires_at)
 
     try:
         db.commit()
@@ -628,19 +655,20 @@ def _handle_subscription_payment(
         return {"status": "ok"}
 
     if mp_status == "approved":
-        expires_str = "-"
         background.add_task(
             send_payment_approved_email,
             to_email,
             label,
-            f"{amount:,.0f}".replace(",", "."),
+            format_amount(amount),
             settings.currency_id,
             expires_str,
+            is_recurring=True,
+            period_every=period_every,
+            period_each=period_each,
         )
     else:
-        retry_link = f"{settings.frontend_url.rstrip('/')}/pricing"
         background.add_task(
-            send_subscription_charge_failed_email, to_email, label, retry_link,
+            send_subscription_charge_failed_email, to_email, label,
         )
 
     return {"status": "ok"}
@@ -676,13 +704,13 @@ def _handle_one_time_payment(
         return {"status": "ignored"}
 
     to_email = user.email
-    label = "Mensual" if plan == "mensual" else "Anual"
+    label = plan_copy(plan).label
     amount = int(payment_data.get("transaction_amount") or 0)
 
     if mp_status == "approved":
         now = datetime.now(timezone.utc)
         tier = activate_paid_tier(db, user_id, plan, now)
-        expires_str = tier.expires_at.strftime("%d/%m/%Y") if tier.expires_at else "-"
+        expires_str = format_date(tier.expires_at)
         db.add(
             Payment(
                 user_id=user_id,
@@ -701,7 +729,7 @@ def _handle_one_time_payment(
             send_payment_approved_email,
             to_email,
             label,
-            f"{amount:,.0f}".replace(",", "."),
+            format_amount(amount),
             settings.currency_id,
             expires_str,
         )
