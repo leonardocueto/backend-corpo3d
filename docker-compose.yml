@@ -15,6 +15,19 @@ services:
       timeout: 5s
       retries: 5
 
+  # OTP de login (los admins pasan siempre por el 2do factor, tengan o no
+  # OTP_ENABLED prendido). Sin volumen a proposito: los codigos son efimeros,
+  # igual que en prod (Render Key Value, sin persistencia).
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build: .
     # Postgres en su primer arranque levanta un server temporal para init y luego se
@@ -24,13 +37,16 @@ services:
     restart: on-failure
     env_file: .env
     environment:
-      # Dentro de la red de compose el host de la DB es el nombre del servicio: "db".
-      # Esto pisa el DATABASE_URL del .env (que apunta a localhost para dev sin docker).
+      # Dentro de la red de compose el host de la DB/Redis es el nombre del servicio.
+      # Esto pisa DATABASE_URL/REDIS_URL del .env (que apuntan a localhost para dev sin docker).
       DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/dashboard
+      REDIS_URL: redis://redis:6379
     ports:
       - "8000:8000"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     # Aplica migraciones y luego levanta la API.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"

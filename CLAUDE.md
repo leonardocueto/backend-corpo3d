@@ -149,6 +149,22 @@ backend/
    OTP OFF el login es de 1 paso como siempre. Modelo `LoginOtp` (migración `0008`): HMAC del
    código, single-use (`used_at`), corto (`OTP_MINUTES`, default **3**), tope `OTP_MAX_ATTEMPTS`
    (default 5).
+   - **Admins: OTP SIEMPRE obligatorio (2026-08-10), sin importar `OTP_ENABLED`.**
+     `_otp_required(user)` en `app/routers/auth.py` es `settings.otp_enabled or user.is_admin`:
+     `OTP_ENABLED` solo gobierna a los usuarios NO admin; un `is_admin=True` pasa por los 2 pasos
+     aunque el switch global esté en `false`. Motivo: los admins crean usuarios, mueven tiers y
+     ven pagos — una password admin filtrada sin 2do factor es acceso total. Consecuencia de
+     infra: **Redis pasa a ser dependencia dura del login admin**, no solo del switch global; sin
+     `REDIS_URL` el login de un admin responde **503** (antes era inalcanzable porque el boot
+     guard de `app/redis.py` mataba el proceso si `OTP_ENABLED=true` sin Redis; ahora con el
+     switch en `false` la app arranca igual y recién falla en ese login puntual — `app/redis.py`
+     loguea un warning al arranque cuando falta `REDIS_URL`). `docker-compose.yml` suma un
+     servicio `redis:7-alpine` para poder probar el flujo en local.
+   - **`resend-otp` tambien filtra por `_otp_required`**: solo emite codigos para usuarios que
+     realmente pasan por OTP (sigue respondiendo 204 para el resto, anti-enumeracion). Si no,
+     con `OTP_ENABLED=false` el endpoint seria un "mandale un mail a esta direccion" **sin
+     autenticacion** para cualquier cuenta activa, cuando esos usuarios ni siquiera llegan a la
+     pantalla de verificacion.
    - **`POST /auth/resend-otp`** (botón "reenviar"): responde **SIEMPRE 204** (anti-enumeración).
      **Cooldown server-side**: NO emite un código nuevo mientras el usuario tenga uno **activo**
      (sin usar y sin vencer) — es la validación real del timer del front (que solo habilita
@@ -325,6 +341,9 @@ límite).
 
 - El token plano vive **solo** en la cookie `HttpOnly`. En DB nunca el token plano, solo su
   HMAC (`String(64)` hex). El pepper es `SESSION_SECRET` (obligatorio, fuera del repo).
+- **El login de un usuario `is_admin` nunca setea cookie en un solo paso.** Siempre pasa por el
+  OTP de email (`_otp_required` en `app/routers/auth.py`), sin importar `OTP_ENABLED`. Si se
+  toca `login()`, no reintroducir un camino que le dé cookie a un admin sin el 2do paso.
 - `UserOut` define la salida: **no agregar campos sensibles** (ni `password_hash` ni
   `created_at`). FastAPI serializa solo lo declarado en el `response_model`.
 - CORS: `allow_credentials=True` + `allow_origins` con dominios **exactos** (nunca `*`; el

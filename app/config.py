@@ -29,14 +29,15 @@ class Settings(BaseSettings):
 
     # OTP de login (2do factor por email). El codigo de 6 digitos vive poco y
     # admite pocos intentos (baja entropia: 1M de combinaciones).
-    # `otp_enabled` es el switch maestro: con False (default) el login inicia sesion
-    # directo como antes (sin OTP); recien con True se exige el codigo. Asi se puede
-    # deployar el codigo y prender el OTP solo cuando el envio de emails este listo
-    # (dominio verificado en Resend, etc.).
+    # `otp_enabled` es el switch para usuarios NO admin: con False (default) esos
+    # logins inician sesion directo (sin OTP); con True se les exige el codigo
+    # tambien. Prender solo cuando el envio de emails este listo (dominio verificado
+    # en Resend, etc.). Los usuarios ADMIN pasan por el OTP SIEMPRE, sin importar
+    # este switch (`_otp_required` en app/routers/auth.py).
     otp_enabled: bool = False
     otp_minutes: int = 3                          # vida del codigo OTP (y cooldown de reenvio)
     otp_max_attempts: int = 5                     # intentos de verificacion antes de invalidar
-    redis_url: str | None = None                  # requerido cuando otp_enabled=True
+    redis_url: str | None = None                  # requerido SIEMPRE (login admin depende de OTP)
 
     # Cloudflare R2 (storage de disenos guardados; bucket PRIVADO, S3-compatible).
     # Opcionales: la app arranca sin esto; solo los endpoints /designs los exigen.

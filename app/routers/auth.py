@@ -95,6 +95,13 @@ def _issue_login_otp(user: User, background: BackgroundTasks) -> None:
     background.add_task(send_login_otp_email, user.email, code)
 
 
+def _otp_required(user: User) -> bool:
+    """Los admins pasan SIEMPRE por el 2do factor, tengan el switch global prendido o
+    no: son las cuentas que crean usuarios, mueven tiers y ven pagos. Para el resto
+    manda `OTP_ENABLED`."""
+    return settings.otp_enabled or user.is_admin
+
+
 @router.post("/login", response_model=LoginResponse)
 @limiter.limit("5/minute")
 def login(
@@ -104,9 +111,10 @@ def login(
     response: Response,
     db: DbSession = Depends(get_db),
 ):
-    """Paso 1 del login. Valida credenciales y, segun `OTP_ENABLED`:
+    """Paso 1 del login. Valida credenciales y, segun `_otp_required`:
     - ON:  dispara un OTP por email y responde `otp_required=True` (sin sesion aun;
-      el cliente verifica el codigo en `/auth/verify-otp`).
+      el cliente verifica el codigo en `/auth/verify-otp`). Se activa con
+      `OTP_ENABLED=true` para todos, o siempre que el usuario sea admin.
     - OFF: inicia sesion directo (cookie) y responde `otp_required=False` + el user,
       igual que el login de un solo paso de antes."""
     user = db.scalar(select(User).where(User.email == payload.email))
@@ -117,7 +125,7 @@ def login(
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
 
-    if not settings.otp_enabled:
+    if not _otp_required(user):
         _start_session(db, user, response)
         return LoginResponse(otp_required=False, user=user)
 
@@ -171,6 +179,11 @@ def resend_otp(
     estar disponible."""
     user = db.scalar(select(User).where(User.email == payload.email))
     if user is None or not user.is_active:
+        return
+    # Solo emite para quien realmente pasa por OTP: si no, este endpoint seria un
+    # "mandale un mail a esta direccion" sin autenticacion (con OTP_ENABLED=false,
+    # un no-admin nunca llega a la pantalla de verificacion).
+    if not _otp_required(user):
         return
     try:
         if has_active_otp(user.id):
