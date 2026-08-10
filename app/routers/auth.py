@@ -425,6 +425,9 @@ def change_password(
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Contrasena actual incorrecta")
     user.password_hash = hash_password(payload.new_password)
+    # La clave ya es del usuario, no la temporal que le puso un admin: se libera el
+    # bloqueo del front. Este es el camino normal para salir de must_change_password.
+    user.must_change_password = False
     db.commit()
 
 
@@ -486,6 +489,10 @@ def reset_password(request: Request, payload: ResetPasswordIn, db: DbSession = D
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token invalido o expirado")
 
     user.password_hash = hash_password(payload.password)
+    # Igual que en change-password: la clave la eligio el usuario, asi que deja de
+    # ser temporal. Sin esto, alguien que recibio una clave del panel y despues uso
+    # "olvide mi contraseña" quedaria trabado en /cambiar-password para siempre.
+    user.must_change_password = False
     reset.used_at = datetime.now(timezone.utc)
     # Revocar todas las sesiones activas: un reset cierra la sesion en todos lados.
     db.execute(
