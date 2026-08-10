@@ -74,7 +74,8 @@ backend/
 - **User**: `id` (UUID), `email` (único), `full_name`, `password_hash` (**nullable**: los
   usuarios creados por Google no tienen password), `is_active`, `is_admin`, `google_sub`
   (**único, nullable**: `sub` estable de la cuenta de Google para linkeo), `auth_provider`
-  (`'password' | 'google'`, default `'password'`), `created_at`. (Columnas de Google: migración
+  (`'password' | 'google'`, default `'password'`), `must_change_password` (default `false`,
+  migración `0013` — ver abajo), `created_at`. (Columnas de Google: migración
   `0007_google_oauth`; **latentes**, hoy todos los users son `auth_provider='password'` — el login
   con Google no esta activo, ver flujo de auth #6.)
 - **Session**: `id` (UUID), `user_id` (FK, `ON DELETE CASCADE`), `token_hash` (único),
@@ -171,6 +172,27 @@ backend/
      "reenviar" al vencer el código), no salteable manipulando el cliente. Al vencer el código
      actual, el reenvío vuelve a estar disponible. (Además hay rate-limit slowapi 1/min por IP,
      que el cooldown de 3 min ya subsume.)
+
+## Claves temporales del panel admin (`must_change_password`)
+
+Cuando un admin da de alta (o resetea) una cuenta desde el panel puede pedirle al front que
+**genere** la contraseña (12 chars, `crypto.getRandomValues`, ver `3D/app/utils/password.ts`).
+Esa clave es **nuestra**, no del usuario: se la mandamos por mail y tiene que reemplazarla.
+
+- **Columna** `users.must_change_password` (bool, default `false`, migración `0013`).
+- **La prende** el panel: `POST /users` y `PATCH /users/{id}/password` la reciben en el body
+  (`must_change_password`, default `false` → los payloads viejos siguen andando igual).
+  **No se prende sola en ningún otro camino**: signup, Google y reset-password nunca la setean.
+- **La apagan** `POST /auth/change-password` y `POST /auth/reset-password`, o sea los dos
+  lugares donde la clave pasa a ser elegida por el usuario. Que reset-password también la baje
+  no es cosmético: sin eso, alguien que recibió una clave del panel y después usó "olvidé mi
+  contraseña" quedaría trabado en `/cambiar-password` para siempre.
+- **Viaja en `UserOut`**, así que la ven `/auth/login`, `/auth/verify-otp` y `/auth/me`.
+- **El bloqueo es del front**, no del backend (decisión 2026-08-10): el middleware global de
+  Nuxt no deja salir de `/cambiar-password` mientras el flag esté prendido, pero los endpoints
+  privados **no** devuelven 403. El riesgo es nulo — el usuario ya se autenticó con una clave
+  que le dimos nosotros, y lo que se busca es que elija una propia, no contener a un atacante.
+  Si algún día hace falta endurecerlo, va como dependency en `deps.py`, no endpoint por endpoint.
 
 ## Exportaciones — gate de descarga (`app/routers/exports.py`)
 

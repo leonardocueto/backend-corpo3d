@@ -18,6 +18,13 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # True = la clave actual es TEMPORAL: la genero un admin desde el panel y se la
+    # mando al usuario por mail. El front (middleware global) no lo deja salir de
+    # /cambiar-password hasta que elija una propia. La bajan change-password y
+    # reset-password. Nunca se prende sola: solo la setea el panel admin.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     # `sub` estable de la cuenta de Google (id de la identidad). Unico; linkea
     # de forma robusta aunque cambie el email. Null = cuenta solo email/password.
     google_sub: Mapped[str | None] = mapped_column(

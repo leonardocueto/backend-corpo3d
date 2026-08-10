@@ -100,6 +100,7 @@ def create_user(payload: UserCreate, db: DbSession = Depends(get_db)):
         full_name=payload.full_name,
         password_hash=hash_password(payload.password),
         is_admin=payload.is_admin,
+        must_change_password=payload.must_change_password,
     )
     db.add(user)
     db.flush()  # asigna user.id para el tier
@@ -160,11 +161,14 @@ def change_password(
     payload: PasswordUpdate,
     db: DbSession = Depends(get_db),
 ):
-    """Cambia/resetea la contraseña de un usuario."""
+    """Cambia/resetea la contraseña de un usuario. Si la clave la genero el panel
+    (`must_change_password`), queda marcada como temporal y el usuario tiene que
+    elegir una propia en el primer ingreso."""
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
     user.password_hash = hash_password(payload.password)
+    user.must_change_password = payload.must_change_password
     db.commit()
 
 
