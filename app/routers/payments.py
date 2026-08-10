@@ -296,8 +296,15 @@ def cancel_subscription(
             detail="No se pudo cancelar la suscripcion",
         )
 
+    # NO se baja el tier aca a proposito: cancelar corta los cobros FUTUROS, pero
+    # el periodo en curso ya esta cobrado y no se reembolsa, asi que el usuario
+    # conserva el acceso hasta `expires_at` (igual que el webhook
+    # `_handle_subscription_status` para paused/cancelled). Al vencer,
+    # `sync_user_tier` -> `downgrade_if_expired` lo pasa a free solo, y
+    # `user_is_unlimited` deja de verlo ilimitado (la sub ya no esta `authorized`
+    # y el tier quedo vencido). La revocacion INMEDIATA queda reservada al
+    # reembolso/contracargo (`_apply_refund`), cuando la plata vuelve.
     sub.mp_status = "cancelled"
-    deactivate_subscription_tier(db, user.id)
     db.commit()
 
     label = "Mensual" if sub.plan == "mensual" else "Anual"
@@ -494,6 +501,43 @@ def _apply_refund(
     # devuelve False aunque la suscripcion siga `authorized` en MP (caso: se
     # reembolso sin cancelar).
     deactivate_subscription_tier(db, user.id)
+
+    # Reembolsar = el cliente se va: cancelar tambien la suscripcion para cortar
+    # los cobros FUTUROS (reembolsar en MP no cancela la preapproval por si solo).
+    # Se busca por `payment.subscription_id` (se setea al registrar el cobro
+    # recurrente) y, como fallback, por la sub non-cancelled mas reciente del
+    # usuario. Best-effort: si el update a MP falla, se loguea pero NO se rompe el
+    # webhook (la revocacion del tier ya esta hecha y debe persistir igual). Un
+    # reembolso de pago legacy one-time no tiene sub asociada y salta este bloque.
+    sub = None
+    if payment is not None and payment.subscription_id is not None:
+        sub = db.get(Subscription, payment.subscription_id)
+    if sub is None:
+        sub = db.scalar(
+            select(Subscription)
+            .where(
+                Subscription.user_id == user.id,
+                Subscription.mp_status != "cancelled",
+            )
+            .order_by(Subscription.created_at.desc())
+        )
+    if sub is not None and sub.mp_status != "cancelled":
+        try:
+            cancel_result = _get_sdk().preapproval().update(
+                sub.mp_preapproval_id, {"status": "cancelled"}
+            )
+            if cancel_result.get("status") in (200, 201):
+                sub.mp_status = "cancelled"
+            else:
+                logger.error(
+                    "MP preapproval cancel en reembolso fallo (sub %s): %s",
+                    sub.id, cancel_result.get("response"),
+                )
+        except Exception:  # noqa: BLE001 - best-effort, no romper el webhook
+            logger.exception(
+                "Error cancelando preapproval en reembolso (sub %s)", sub.id
+            )
+
     db.commit()
     logger.info(
         "Pago %s en estado %s: tier del usuario %s revertido a free",
