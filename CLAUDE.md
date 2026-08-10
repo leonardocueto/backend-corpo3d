@@ -149,6 +149,22 @@ backend/
    OTP OFF el login es de 1 paso como siempre. Modelo `LoginOtp` (migración `0008`): HMAC del
    código, single-use (`used_at`), corto (`OTP_MINUTES`, default **3**), tope `OTP_MAX_ATTEMPTS`
    (default 5).
+   - **Admins: OTP SIEMPRE obligatorio (2026-08-10), sin importar `OTP_ENABLED`.**
+     `_otp_required(user)` en `app/routers/auth.py` es `settings.otp_enabled or user.is_admin`:
+     `OTP_ENABLED` solo gobierna a los usuarios NO admin; un `is_admin=True` pasa por los 2 pasos
+     aunque el switch global esté en `false`. Motivo: los admins crean usuarios, mueven tiers y
+     ven pagos — una password admin filtrada sin 2do factor es acceso total. Consecuencia de
+     infra: **Redis pasa a ser dependencia dura del login admin**, no solo del switch global; sin
+     `REDIS_URL` el login de un admin responde **503** (antes era inalcanzable porque el boot
+     guard de `app/redis.py` mataba el proceso si `OTP_ENABLED=true` sin Redis; ahora con el
+     switch en `false` la app arranca igual y recién falla en ese login puntual — `app/redis.py`
+     loguea un warning al arranque cuando falta `REDIS_URL`). `docker-compose.yml` suma un
+     servicio `redis:7-alpine` para poder probar el flujo en local.
+   - **`resend-otp` tambien filtra por `_otp_required`**: solo emite codigos para usuarios que
+     realmente pasan por OTP (sigue respondiendo 204 para el resto, anti-enumeracion). Si no,
+     con `OTP_ENABLED=false` el endpoint seria un "mandale un mail a esta direccion" **sin
+     autenticacion** para cualquier cuenta activa, cuando esos usuarios ni siquiera llegan a la
+     pantalla de verificacion.
    - **`POST /auth/resend-otp`** (botón "reenviar"): responde **SIEMPRE 204** (anti-enumeración).
      **Cooldown server-side**: NO emite un código nuevo mientras el usuario tenga uno **activo**
      (sin usar y sin vencer) — es la validación real del timer del front (que solo habilita
@@ -236,18 +252,29 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   vía el flag `is_chargeback`; se encola DESPUÉS del commit de la revocación).
 - **Mails de resultado (legacy)**: approved → activa tier; rejected/cancelled → registra el
   status + email.
-- **Cancelar ≠ reembolsar (2026-08-09).** Son dos efectos distintos sobre el tier:
-  - **Cancelada o pausada** (`subscription_preapproval`) → corta los cobros **futuros**, pero
-    **el tier pago se conserva hasta `expires_at`**: el período en curso ya se cobró y no se
-    devuelve. `_handle_subscription_status` **no** llama a `deactivate_subscription_tier`; el
-    downgrade lo hace solo `sync_user_tier` → `downgrade_if_expired` cuando vence.
-    `user_is_unlimited` lo sostiene por el fallback `tier_is_unlimited` (la suscripción ya no
-    está `authorized`, pero el tier sigue siendo pago y vigente).
+- **Cancelar ≠ reembolsar (2026-08-09; endpoint alineado y auto-cancel en reembolso 2026-08-10).**
+  Son dos efectos distintos sobre el tier:
+  - **Cancelada o pausada** → corta los cobros **futuros**, pero **el tier pago se conserva hasta
+    `expires_at`**: el período en curso ya se cobró y no se devuelve. Vale **tanto** para la
+    cancelación desde el panel de MP (webhook `subscription_preapproval` →
+    `_handle_subscription_status`) **como** para la cancelación desde la app
+    (`POST /payments/cancel-subscription`): **ninguno** llama a `deactivate_subscription_tier`
+    (el endpoint dejó de hacerlo el 2026-08-10, antes bajaba el tier en el acto e iba
+    inconsistente con el webhook). El downgrade lo hace solo `sync_user_tier` →
+    `downgrade_if_expired` cuando vence. `user_is_unlimited` lo sostiene por el fallback
+    `tier_is_unlimited` (la suscripción ya no está `authorized`, pero el tier sigue siendo pago y
+    vigente).
   - **Reembolsada o con contracargo** (`_apply_refund`, estados `refunded` / `charged_back`) →
     **revocación inmediata a free**, porque la plata volvió. Marca el `Payment` con el estado
     nuevo y llama a `deactivate_subscription_tier`, que además desengancha
     `tier.subscription_id` — así queda revocado incluso si la suscripción sigue `authorized` en
-    MP (caso: se reembolsó sin cancelar).
+    MP. **Además cancela la suscripción en MP** (2026-08-10): reembolsar = el cliente se va, así
+    que `_apply_refund` cancela la preapproval (`sdk.preapproval().update(..., cancelled)`) y
+    marca la `Subscription` local `cancelled`, para que **no vuelva a cobrar el mes siguiente**.
+    Ubica la sub por `payment.subscription_id` (fallback: la non-cancelled más reciente del
+    usuario). Es **best-effort**: si el update a MP falla, se loguea pero NO rompe el webhook (la
+    revocación del tier ya está persistida). Un reembolso de pago legacy one-time no tiene sub y
+    salta el bloque.
   - **`_apply_refund` corre ANTES del guard de idempotencia** por `mp_payment_id` de los dos
     handlers de pago. Es obligatorio que sea así: MP re-notifica el reembolso con el **mismo**
     id de pago, y ese guard corta con `{"status": "ok"}` apenas encuentra la fila. Su
@@ -256,7 +283,10 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
     `status_detail=partially_refunded` y el usuario conserva el tier (devolviste una parte).
 - **Reembolsos**: se hacen **manual desde el panel de Mercado Pago** (no hay endpoint en el
   backend). Decisión de producto (2026-08-01): mantenerlo manual mientras el volumen sea bajo.
-  El webhook del reembolso sí está automatizado (ver arriba): reembolsás en MP y el tier cae solo.
+  El webhook del reembolso está automatizado (ver arriba): reembolsás en MP y el tier cae solo
+  **y la suscripción se cancela sola** (2026-08-10) — ya **no** hace falta cancelarla a mano
+  como paso aparte; una sola acción (reembolsar) devuelve la plata, baja el tier y frena la
+  renovación.
 - **Botón de arrepentimiento** (Ley 24.240 art. 34 + Res. 424/2020): `POST /payments/withdrawal`
   (endpoint **público**, sin sesión, rate-limit 3/min). Recibe `full_name`, `email` y `reason`;
   manda email a `info@corpolab3d.com` con los datos (template `withdrawal_request.html`). El
@@ -325,6 +355,9 @@ límite).
 
 - El token plano vive **solo** en la cookie `HttpOnly`. En DB nunca el token plano, solo su
   HMAC (`String(64)` hex). El pepper es `SESSION_SECRET` (obligatorio, fuera del repo).
+- **El login de un usuario `is_admin` nunca setea cookie en un solo paso.** Siempre pasa por el
+  OTP de email (`_otp_required` en `app/routers/auth.py`), sin importar `OTP_ENABLED`. Si se
+  toca `login()`, no reintroducir un camino que le dé cookie a un admin sin el 2do paso.
 - `UserOut` define la salida: **no agregar campos sensibles** (ni `password_hash` ni
   `created_at`). FastAPI serializa solo lo declarado en el `response_model`.
 - CORS: `allow_credentials=True` + `allow_origins` con dominios **exactos** (nunca `*`; el
