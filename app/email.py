@@ -94,10 +94,18 @@ def send_welcome_email(to_email: str, full_name: str | None) -> None:
 
 
 def send_payment_approved_email(
-    to_email: str, plan_label: str, amount: str, currency: str, expires_at: str
+    to_email: str,
+    plan_label: str,
+    amount: str,
+    currency: str,
+    expires_at: str,
+    is_recurring: bool = False,
+    period_every: str = "",
+    period_each: str = "",
 ) -> None:
     """Confirma un pago aprobado (tier activado). El caller pasa el monto/vencimiento
-    ya formateados como texto (esta capa solo arma y envia)."""
+    ya formateados como texto (esta capa solo arma y envia). `is_recurring` distingue
+    el cobro de una suscripcion (debito automatico) del pago unico legacy."""
     if not settings.resend_api_key:
         logger.warning("[DEV] Payment approved email para %s (%s)", to_email, plan_label)
         return
@@ -107,6 +115,9 @@ def send_payment_approved_email(
         amount=amount,
         currency=currency,
         expires_at=expires_at,
+        is_recurring=is_recurring,
+        period_every=period_every,
+        period_each=period_each,
         app_link=f"{settings.frontend_url.rstrip('/')}/editor",
     )
     _send(to_email, "Pago confirmado - CorpoLab 3D", html)
@@ -146,7 +157,13 @@ def send_tier_expiring_email(
 
 
 def send_subscription_activated_email(
-    to_email: str, plan_label: str, amount: str, currency: str
+    to_email: str,
+    plan_label: str,
+    amount: str,
+    currency: str,
+    period_every: str,
+    period_each: str,
+    next_charge_at: str,
 ) -> None:
     if not settings.resend_api_key:
         logger.warning("[DEV] Subscription activated email para %s (%s)", to_email, plan_label)
@@ -156,6 +173,9 @@ def send_subscription_activated_email(
         plan_label=plan_label,
         amount=amount,
         currency=currency,
+        period_every=period_every,
+        period_each=period_each,
+        next_charge_at=next_charge_at,
         app_link=f"{settings.frontend_url.rstrip('/')}/editor",
     )
     _send(to_email, "Suscripción activada - CorpoLab 3D", html)
@@ -186,13 +206,16 @@ def send_refund_email(
     _send(to_email, subject, html)
 
 
-def send_subscription_cancelled_email(to_email: str, plan_label: str) -> None:
+def send_subscription_cancelled_email(
+    to_email: str, plan_label: str, expires_at: str = ""
+) -> None:
     if not settings.resend_api_key:
         logger.warning("[DEV] Subscription cancelled email para %s (%s)", to_email, plan_label)
         return
     html = render_email(
         "subscription_cancelled.html",
         plan_label=plan_label,
+        expires_at=expires_at,
         reactivate_link=f"{settings.frontend_url.rstrip('/')}/pricing",
     )
     _send(to_email, "Suscripción cancelada - CorpoLab 3D", html)

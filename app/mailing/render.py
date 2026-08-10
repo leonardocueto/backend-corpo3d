@@ -10,6 +10,7 @@ de soporte). Autoescape ON: las variables (link, email, codigo) se escapan solas
 seguro que el `str.replace` de antes.
 """
 
+from datetime import datetime
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -36,3 +37,13 @@ def render_email(template_name: str, **ctx: object) -> str:
         support_email="info@corpolab3d.com",
         **ctx,
     )
+
+
+def format_date(value: datetime | None) -> str:
+    """Formato unico de fecha para los mails ("%d/%m/%Y"); "" si no hay valor."""
+    return value.strftime("%d/%m/%Y") if value else ""
+
+
+def format_amount(value: int | float | None) -> str:
+    """Formato unico de monto para los mails: separador de miles con punto, sin decimales."""
+    return f"{(value or 0):,.0f}".replace(",", ".")
