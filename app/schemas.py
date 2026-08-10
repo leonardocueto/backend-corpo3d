@@ -49,6 +49,9 @@ class UserOut(BaseModel):
     email: EmailStr
     full_name: str | None
     is_admin: bool
+    # True = la clave es una temporal puesta por un admin. El front lo usa para
+    # forzar el paso por /cambiar-password antes de dejar entrar a la app.
+    must_change_password: bool = False
 
 
 class LoginResponse(BaseModel):
@@ -85,6 +88,9 @@ class UserCreate(BaseModel):
     full_name: str | None = None
     is_admin: bool = False
     tier: Literal["free", "mensual", "anual"] = "free"
+    # El panel lo manda en True cuando la clave salio de su generador: es una clave
+    # nuestra, temporal, asi que al usuario se le pide cambiarla al ingresar.
+    must_change_password: bool = False
 
 
 class UserUpdate(BaseModel):
@@ -96,9 +102,12 @@ class UserUpdate(BaseModel):
 
 
 class PasswordUpdate(BaseModel):
-    """Cambio/reseteo de contraseña."""
+    """Cambio/reseteo de contraseña desde el panel admin. `must_change_password`
+    marca la clave como temporal (la genero el panel): el usuario tiene que
+    cambiarla en el primer ingreso."""
 
     password: str = Field(min_length=8)
+    must_change_password: bool = False
 
 
 class ChangePasswordIn(BaseModel):
