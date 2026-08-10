@@ -16,8 +16,9 @@ from sqlalchemy import exists, select
 from app.config import settings
 from app.database import SessionLocal
 from app.email import send_tier_expiring_email
+from app.mailing.render import format_date
 from app.models import Subscription, User, UserTier
-from app.routers.tiers import PAID_TIERS
+from app.routers.tiers import PAID_TIERS, plan_copy
 
 
 def main() -> None:
@@ -59,8 +60,8 @@ def main() -> None:
         ).all()
 
         for tier, user in rows:
-            plan_label = "Mensual" if tier.tier == "mensual" else "Anual"
-            expires_str = tier.expires_at.strftime("%d/%m/%Y")
+            plan_label = plan_copy(tier.tier).label
+            expires_str = format_date(tier.expires_at)
             if args.dry_run:
                 print(f"[dry-run] avisaria a {user.email} ({plan_label}, vence {expires_str})")
                 continue

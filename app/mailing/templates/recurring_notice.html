@@ -1,0 +1,27 @@
+{#
+  Aviso de debito automatico — partial compartido por `subscription_activated.html` y
+  `payment_approved.html` (cuando el cobro es de una suscripcion). Es copy de
+  cumplimiento: el usuario tiene que saber que el cargo SE REPITE, cuanto y cada cuanto.
+  Vive aca para que las dos plantillas no se desincronicen.
+
+  Contexto: `period_every` ("todos los meses"), `amount`, `currency` y, opcional,
+  `next_charge_at` (si no viene, se omite la frase de la proxima fecha en vez de
+  dejar "el ." colgando).
+#}
+<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 24px 0; background-color:#f4f4fb; border-radius:0 14px 14px 0; border-left:4px solid #4e5af2;">
+  <tr>
+    <td style="padding:16px 20px;">
+      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; color:#1b1b1b; font-weight:700;">
+        Es una suscripción con débito automático.
+      </p>
+      <p style="margin:0; font-size:14px; line-height:1.6; color:#6b6b6b;">
+        <strong style="color:#1b1b1b;">{{ period_every }}</strong> se va a debitar
+        <strong style="color:#1b1b1b;">{{ amount }} {{ currency }}</strong> de tu medio de pago,
+        de forma automática, hasta que la canceles.{% if next_charge_at %} El próximo débito es el
+        <strong style="color:#1b1b1b;">{{ next_charge_at }}</strong>.{% endif %} Podés cancelarla
+        cuando quieras desde tu cuenta, sin costo ni permanencia mínima; si cancelás, conservás
+        el acceso hasta el final del período ya pagado.
+      </p>
+    </td>
+  </tr>
+</table>
