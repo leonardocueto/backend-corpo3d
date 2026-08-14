@@ -352,6 +352,10 @@ def signup(
             token_hash=hash_token(token),
             expires_at=datetime.now(timezone.utc)
             + timedelta(minutes=settings.signup_token_minutes),
+            # Aceptacion de los legales: el bool ya lo exigio SignupIn (422 si no
+            # viene True). La VERSION la pone el servidor, no el cliente.
+            terms_accepted_at=datetime.now(timezone.utc),
+            terms_version=settings.terms_version,
         )
     )
     db.commit()
@@ -399,6 +403,10 @@ def verify_signup(
             # Ya viene hasheado del signup: NO re-hashear.
             password_hash=pending.password_hash,
             is_admin=False,  # forzado: el alta publica nunca crea admins
+            # Se copia el momento del SIGNUP (cuando tildo el checkbox), no el de
+            # ahora: lo que vale como aceptacion es el clic, no la confirmacion.
+            terms_accepted_at=pending.terms_accepted_at,
+            terms_version=pending.terms_version,
         )
         db.add(user)
 

@@ -80,6 +80,9 @@ def list_users(
             tier_expires_at=tier_obj.expires_at if tier_obj else None,
             export_remaining=None if unlimited else remaining_for(win_by_user.get(u.id), now),
             export_unlimited=unlimited,
+            # Explicitos: no vienen en `base` porque UserOut no los declara.
+            terms_accepted_at=u.terms_accepted_at,
+            terms_version=u.terms_version,
         )
 
     return UsersPage(

@@ -75,7 +75,8 @@ backend/
   usuarios creados por Google no tienen password), `is_active`, `is_admin`, `google_sub`
   (**único, nullable**: `sub` estable de la cuenta de Google para linkeo), `auth_provider`
   (`'password' | 'google'`, default `'password'`), `must_change_password` (default `false`,
-  migración `0013` — ver abajo), `created_at`. (Columnas de Google: migración
+  migración `0013` — ver abajo), `terms_accepted_at` + `terms_version` (nullable, migración
+  `0014` — ver abajo), `created_at`. (Columnas de Google: migración
   `0007_google_oauth`; **latentes**, hoy todos los users son `auth_provider='password'` — el login
   con Google no esta activo, ver flujo de auth #6.)
 - **Session**: `id` (UUID), `user_id` (FK, `ON DELETE CASCADE`), `token_hash` (único),
@@ -117,6 +118,14 @@ backend/
    registrado"**; si hay un pendiente sin confirmar → se **invalida y se emite uno nuevo** (un
    solo link vivo a la vez, patrón de `forgot-password`). No acepta `is_admin`/`tier`
    (anti-escalada). Rate limit 5/min. Vida del token: `SIGNUP_TOKEN_MINUTES` (default 60).
+   - **Exige `accepted_terms: true`** (aceptación de Términos + Privacidad, migración `0014`):
+     sin el campo o con `false` → **422**. En `SignupIn` va como
+     `Field(default=False, validate_default=True)`: **el `validate_default` es imprescindible**,
+     pydantic v2 **no corre los validators sobre los defaults** y omitir el campo se salteaba el
+     guard (medido: respondía 202). **La VERSIÓN no la manda el cliente**: la estampa el servidor
+     desde `settings.terms_version` (`TERMS_VERSION`, default `"2026-08-07"`) — un string de
+     versión que sale del navegador no prueba nada. Se guardan `terms_accepted_at` +
+     `terms_version` en el `PendingRegistration` y de ahí se copian al `User`.
    - **`PendingRegistration`** (`models.py`, migración `0009`): espejo de `PasswordResetToken`
      pero **sin FK a `users`** (el usuario aún no existe). En DB solo el HMAC del token; `email`
      indexado NO único (se reusa tras confirmar/expirar). Se eligió tabla aparte (no `User`
@@ -132,6 +141,9 @@ backend/
      el caso idempotente) se encola `send_welcome_email` en BackgroundTask, después del commit.
      Solo aplica al signup público; las altas de admin (`/auth/register`, `POST /users`) no
      mandan bienvenida.
+   - **Aceptación de legales**: se copian `terms_accepted_at` / `terms_version` del pending tal
+     cual, **sin re-estampar la fecha**. Lo que vale como aceptación es el momento del **clic en
+     el registro**, no el de la confirmación del mail (que puede ser una hora después).
 6. `POST /auth/google`: login con **Google (OIDC)** — **NO IMPLEMENTADO / LATENTE**. El
    codigo del backend ya existe (`app/google_oauth.py`, endpoint, migracion `0007`, columnas
    `google_sub`/`auth_provider`) pero **no esta activo end-to-end**: el front no tiene boton de
@@ -193,6 +205,32 @@ Esa clave es **nuestra**, no del usuario: se la mandamos por mail y tiene que re
   privados **no** devuelven 403. El riesgo es nulo — el usuario ya se autenticó con una clave
   que le dimos nosotros, y lo que se busca es que elija una propia, no contener a un atacante.
   Si algún día hace falta endurecerlo, va como dependency en `deps.py`, no endpoint por endpoint.
+
+## Aceptación de los legales (`users.terms_accepted_at` / `terms_version`)
+
+Evidencia de que el usuario **vio y aceptó** los Términos y la Privacidad. No es cosmético: los
+Términos §1 afirman que crear una cuenta implica aceptarlos, y las cláusulas que más protegen
+(§12 validación de fabricación, §15 limitación de responsabilidad) son **inoponibles si no se
+puede probar que se exhibieron**. Antes de la migración `0014` el registro no mostraba ni exigía
+nada, así que esa aceptación no existía en ningún lado.
+
+- **Dónde se sella**: `POST /auth/signup` (el clic del checkbox). El `User` todavía no existe, así
+  que viaja por `PendingRegistration` y `/auth/verify-signup` lo copia **sin re-estampar la fecha**.
+- **La versión la pone el servidor** (`TERMS_VERSION`, default `"2026-08-07"`), nunca el cliente.
+  Tiene que coincidir con `LEGAL_VERSION` del front (`3D/app/utils/legal.ts`), que es la que se
+  imprime en `/terminos` y `/privacidad`. **Si se actualiza el documento, se suben las dos.**
+- **Valores posibles de `terms_version`**:
+  - `"2026-08-07"` (o la vigente) → aceptación real, con su fecha.
+  - `"legacy-backfill"` → cuenta anterior al checkbox. La migración `0014` la dio por aceptada con
+    `terms_accepted_at = created_at`. Es una aceptación **asumida por uso previo**, no un clic
+    registrado; se marca distinto a propósito (un registro que afirmara lo contrario sería peor
+    evidencia que ninguno).
+  - `NULL` → **no consta**. Son las altas hechas por admin (`/auth/register`, `POST /users`): no
+    hay nadie del otro lado aceptando nada en ese momento. El panel las muestra en rojo.
+- **Salida**: van en `AdminUserOut` (panel admin), **NO en `UserOut`** — ese schema es el
+  público/de sesión y no lleva campos extra.
+- **Lo que NO hay todavía**: nada obliga a **re-aceptar** cuando sube la versión del documento
+  (ver TODO en el `CLAUDE.md` raíz).
 
 ## Exportaciones — gate de descarga (`app/routers/exports.py`)
 

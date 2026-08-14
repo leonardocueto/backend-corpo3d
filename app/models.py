@@ -35,6 +35,17 @@ class User(Base):
     auth_provider: Mapped[str] = mapped_column(
         String(16), default="password", server_default="password", nullable=False
     )
+    # Aceptacion de los Terminos y la Privacidad. Es la EVIDENCIA de que el usuario
+    # vio el contrato: sin esto, clausulas como la validacion de fabricacion o el
+    # limite de responsabilidad son dificiles de oponer. Se sella en el signup (el
+    # momento del clic real, no el de la confirmacion del mail) y viaja hasta aca
+    # por `PendingRegistration`. NULL = no consta aceptacion (altas por admin).
+    # 'legacy-backfill' en `terms_version` = usuario anterior al checkout de
+    # Terminos, dado por aceptado por uso previo (migracion 0014), NO un clic real.
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    terms_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -108,6 +119,14 @@ class PendingRegistration(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Aceptacion de los legales: ocurre ACA (el usuario tildo el checkbox y mando el
+    # form), pero el `User` recien nace al confirmar el mail. Se copian tal cual en
+    # /auth/verify-signup, igual que `password_hash`: lo que vale es el momento del
+    # clic, no el de la confirmacion.
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    terms_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class LoginOtp(Base):

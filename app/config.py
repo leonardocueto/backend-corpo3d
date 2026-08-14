@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     resend_api_key: str | None = None            # si falta, en dev se loguea el link
     email_from: str = "CorpoLab 3D <no-reply@corpolab3d.com>"  # dominio verificado en Resend
 
+    # Version vigente de los documentos legales (Terminos + Privacidad). Es la que
+    # se estampa en `users.terms_version` cuando alguien acepta en el registro.
+    # FUENTE DE VERDAD DEL SERVIDOR: el cliente NO manda la version (un string que
+    # viene del navegador no prueba nada). Debe coincidir con LEGAL_VERSION del
+    # front (3D/app/utils/legal.ts) y con la fecha publicada en /terminos.
+    terms_version: str = "2026-08-07"
+
     # OTP de login (2do factor por email). El codigo de 6 digitos vive poco y
     # admite pocos intentos (baja entropia: 1M de combinaciones).
     # `otp_enabled` es el switch para usuarios NO admin: con False (default) esos

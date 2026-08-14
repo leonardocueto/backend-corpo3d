@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class LoginIn(BaseModel):
@@ -20,11 +20,29 @@ class RegisterIn(BaseModel):
 class SignupIn(BaseModel):
     """Alta self-serve (endpoint publico). A diferencia de RegisterIn (admin),
     NO acepta `is_admin` ni `tier`: el endpoint fuerza siempre usuario comun +
-    tier free. `password` con minimo 8 (igual que UserCreate y change-password)."""
+    tier free. `password` con minimo 8 (igual que UserCreate y change-password).
+
+    Tampoco acepta la VERSION de los legales: la estampa el servidor
+    (`settings.terms_version`). Un string de version que viene del navegador no
+    prueba nada."""
 
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: str | None = None
+    # Aceptacion de Terminos + Privacidad. Default False A PROPOSITO (fail-closed):
+    # un payload que no manda el campo FALLA con 422, no pasa de largo dando el
+    # consentimiento por supuesto.
+    # `validate_default=True` es IMPRESCINDIBLE: pydantic v2 NO corre los validators
+    # sobre los defaults. Sin esto, omitir el campo se saltea el validator y el alta
+    # entra sin consentimiento (probado: respondia 202).
+    accepted_terms: bool = Field(default=False, validate_default=True)
+
+    @field_validator("accepted_terms")
+    @classmethod
+    def _must_accept(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("Tenes que aceptar los Terminos y Condiciones y la Politica de Privacidad")
+        return v
 
 
 class VerifySignupIn(BaseModel):
@@ -140,6 +158,11 @@ class AdminUserOut(UserOut):
     tier_expires_at: datetime | None
     export_remaining: int | None
     export_unlimited: bool
+    # Evidencia de aceptacion de los legales. Van aca y NO en UserOut: ese es el
+    # schema publico/de sesion y no lleva campos extra (invariante del backend).
+    # None = no consta (alta hecha por un admin, o cuenta anterior a la 0014).
+    terms_accepted_at: datetime | None = None
+    terms_version: str | None = None
 
 
 class UsersPage(BaseModel):
