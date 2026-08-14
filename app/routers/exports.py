@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
-from app.deps import get_current_user, require_admin
+from app.deps import require_admin, require_legal_acceptance
 from app.models import ExportLog, ExportWindow, Payment, User
 from app.ratelimit import limiter
 from app.routers.tiers import user_is_unlimited
@@ -91,7 +91,7 @@ def _get_or_create_locked(db: DbSession, user_id, now: datetime) -> ExportWindow
 
 @router.get("/attempts", response_model=ExportAttemptsOut)
 def get_attempts(
-    user: User = Depends(get_current_user), db: DbSession = Depends(get_db)
+    user: User = Depends(require_legal_acceptance), db: DbSession = Depends(get_db)
 ) -> ExportAttemptsOut:
     """Intentos restantes del usuario para la ventana actual. Solo lectura: no
     crea ni resetea la fila (una ventana expirada se reporta como fresca)."""
@@ -185,7 +185,7 @@ def download_export(
     files: list[UploadFile] = File(...),
     structure_id: str = Form(...),
     project_name: str = Form(""),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_legal_acceptance),
     db: DbSession = Depends(get_db),
 ) -> Response:
     """Punto de enforcement REAL de la descarga: recibe los archivos generados en

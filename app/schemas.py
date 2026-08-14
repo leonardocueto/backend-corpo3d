@@ -22,27 +22,48 @@ class SignupIn(BaseModel):
     NO acepta `is_admin` ni `tier`: el endpoint fuerza siempre usuario comun +
     tier free. `password` con minimo 8 (igual que UserCreate y change-password).
 
-    Tampoco acepta la VERSION de los legales: la estampa el servidor
-    (`settings.terms_version`). Un string de version que viene del navegador no
-    prueba nada."""
+    Tampoco acepta las VERSIONES de los legales: las estampa el servidor
+    (`settings.terms_version` / `privacy_version`). Un string de version que viene
+    del navegador no prueba nada."""
 
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: str | None = None
-    # Aceptacion de Terminos + Privacidad. Default False A PROPOSITO (fail-closed):
-    # un payload que no manda el campo FALLA con 422, no pasa de largo dando el
-    # consentimiento por supuesto.
+    # Aceptacion de cada documento, por separado. Default False A PROPOSITO
+    # (fail-closed): un payload que no manda el campo FALLA con 422, no pasa de
+    # largo dando el consentimiento por supuesto.
     # `validate_default=True` es IMPRESCINDIBLE: pydantic v2 NO corre los validators
     # sobre los defaults. Sin esto, omitir el campo se saltea el validator y el alta
     # entra sin consentimiento (probado: respondia 202).
     accepted_terms: bool = Field(default=False, validate_default=True)
+    accepted_privacy: bool = Field(default=False, validate_default=True)
 
     @field_validator("accepted_terms")
     @classmethod
-    def _must_accept(cls, v: bool) -> bool:
+    def _must_accept_terms(cls, v: bool) -> bool:
         if not v:
-            raise ValueError("Tenes que aceptar los Terminos y Condiciones y la Politica de Privacidad")
+            raise ValueError("Tenes que aceptar los Terminos y Condiciones")
         return v
+
+    @field_validator("accepted_privacy")
+    @classmethod
+    def _must_accept_privacy(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("Tenes que aceptar las Politicas de Privacidad")
+        return v
+
+
+class AcceptLegalIn(BaseModel):
+    """Aceptacion de los legales desde /politicas (usuario con sesion activa que
+    todavia no acepto, o que tiene una version vieja). Se manda que documento se
+    esta aceptando; el servidor sella la VERSION vigente de cada uno.
+
+    Los dos default False: aceptar es un acto explicito. Mandar `false` no es un
+    error (no rompe con 422) — simplemente no sella ese documento, y el usuario
+    sigue bloqueado hasta que lo acepte."""
+
+    accept_terms: bool = False
+    accept_privacy: bool = False
 
 
 class VerifySignupIn(BaseModel):
@@ -70,6 +91,13 @@ class UserOut(BaseModel):
     # True = la clave es una temporal puesta por un admin. El front lo usa para
     # forzar el paso por /cambiar-password antes de dejar entrar a la app.
     must_change_password: bool = False
+    # Estado de aceptacion de cada documento legal, DERIVADO en el servidor
+    # (`User.terms_accepted` / `privacy_accepted`: version guardada == vigente).
+    # El front los usa para mandar a /politicas y para decidir que checkbox mostrar.
+    # NO son enforcement: un cliente puede mentirle a su propio front. Lo que corta
+    # de verdad es `require_legal_acceptance` (403) en los endpoints privados.
+    terms_accepted: bool = False
+    privacy_accepted: bool = False
 
 
 class LoginResponse(BaseModel):
@@ -158,11 +186,13 @@ class AdminUserOut(UserOut):
     tier_expires_at: datetime | None
     export_remaining: int | None
     export_unlimited: bool
-    # Evidencia de aceptacion de los legales. Van aca y NO en UserOut: ese es el
-    # schema publico/de sesion y no lleva campos extra (invariante del backend).
-    # None = no consta (alta hecha por un admin, o cuenta anterior a la 0014).
+    # Evidencia de aceptacion (fecha + version aceptada de cada documento). Van aca
+    # y NO en UserOut, que lleva solo los bools derivados: la evidencia cruda es
+    # para el panel admin. None = no consta (alta hecha por un admin).
     terms_accepted_at: datetime | None = None
     terms_version: str | None = None
+    privacy_accepted_at: datetime | None = None
+    privacy_version: str | None = None
 
 
 class UsersPage(BaseModel):
