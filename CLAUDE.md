@@ -418,13 +418,24 @@ límite).
 
 El front debe llamar a la API con `credentials: "include"` para enviar/recibir la cookie.
 
-## Producción (Cloudflare + Vercel + Render + Neon)
+## Producción (Cloudflare + Render + Neon)
 
-Topología: visitante → **Cloudflare** (DNS + proxy + WAF) → **Vercel** (front `www.corpolab3d.com`)
-/ **Render** (backend `api.corpolab3d.com`). DB en **Neon** (solo accesible por `DATABASE_URL`
-desde Render). Cookie **host-only** (`COOKIE_DOMAIN` ausente a propósito), `COOKIE_SAMESITE=lax`
-(www y api son same-site). **Render y Neon co-ubicados en Ohio (US East)** desde 2026-08-04
-(antes: Render Oregon + Neon São Paulo, ~950 ms por endpoint; ahora ~200 ms).
+Topología: visitante → **Cloudflare** (DNS + proxy + WAF) → **Cloudflare Pages** (front
+`www.corpolab3d.com`) / **Render** (backend `api.corpolab3d.com`). DB en **Neon** (solo accesible
+por `DATABASE_URL` desde Render). Cookie **host-only** (`COOKIE_DOMAIN` ausente a propósito),
+`COOKIE_SAMESITE=lax` (www y api son same-site). **Render y Neon co-ubicados en Ohio (US East)**
+desde 2026-08-04 (antes: Render Oregon + Neon São Paulo, ~950 ms por endpoint; ahora ~200 ms).
+
+> **El front se mudó de Vercel a Cloudflare Pages el 2026-08-13** (motivo: Vercel Free/Hobby no
+> permite uso comercial). Para el backend **no cambió nada**: `www.corpolab3d.com` ya estaba en
+> `CORS_ORIGINS` y sigue siendo *same-site* con `api.corpolab3d.com`, así que la cookie `lax` viaja
+> igual. Detalle completo en el `CLAUDE.md` de la raíz → "Infra / hosting".
+>
+> **Cuidado si alguna vez se prueba el front en un `*.pages.dev`**: `pages.dev` es otro dominio
+> registrable → el request a la API es **cross-site** → la cookie `lax` NO viaja y el login no
+> funciona, aunque CORS esté bien. Haría falta `COOKIE_SAMESITE=none`, que afloja la política para
+> todos los usuarios de producción. Por eso la migración se hizo con cutover directo sobre `www`,
+> sin staging en `pages.dev`.
 
 - **Render deploya desde `main`, NO desde `dev`.** `dev` = staging; se promueve con el workflow
   **manual** de GitHub Actions **"Promote dev to main"** (Actions → Run workflow): corre CI sobre
