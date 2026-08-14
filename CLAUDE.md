@@ -71,6 +71,11 @@ backend/
 
 ## Modelo de datos (`models.py`)
 
+- **User** ganó `deactivated_at` (nullable, migración `0016`): fecha en que el usuario pidió la
+  baja desde `POST /auth/deactivate`. Va **aparte de `is_active`** a propósito — el bool es el
+  interruptor que corta el acceso, esta columna es la **constancia** de cuándo entró el pedido
+  (sin fecha no se sostiene el plazo del art. 16 de la Ley 25.326). `NULL` + `is_active=False` =
+  la desactivó un admin, no el usuario. Se limpia al reactivar desde el panel.
 - **User**: `id` (UUID), `email` (único), `full_name`, `password_hash` (**nullable**: los
   usuarios creados por Google no tienen password), `is_active`, `is_admin`, `google_sub`
   (**único, nullable**: `sub` estable de la cuenta de Google para linkeo), `auth_provider`
@@ -194,6 +199,26 @@ backend/
      "reenviar" al vencer el código), no salteable manipulando el cliente. Al vencer el código
      actual, el reenvío vuelve a estar disponible. (Además hay rate-limit slowapi 1/min por IP,
      que el cooldown de 3 min ya subsume.)
+8. **`POST /auth/deactivate`: baja self-service** (2026-08-14, rate-limit 3/min). Es un **borrado
+   BLANDO**, no un `DELETE`: pone `is_active=False`, estampa `deactivated_at`, cancela la
+   suscripción en MP y revoca todas las sesiones.
+   - **Por qué blando**: `payments` y `export_logs` referencian al usuario. Un hard delete los
+     deja con `user_id=NULL` y se pierde a quién correspondía cada cobro, que es justo lo que la
+     normativa fiscal obliga a conservar. El corte de acceso es igual de inmediato: `deps.py`
+     valida `is_active` en **cada** request, así que la sesión muere en el siguiente llamado.
+   - **Usa `get_current_user`, NO `require_legal_acceptance`** — mismo criterio que `/logout` y
+     `/accept-legal`: exigir la aceptación de un contrato para poder irse sería coercitivo. Un
+     usuario trabado en `/politicas` **tiene** que poder darse de baja (verificado: 204, no 403).
+   - **Cancelar la suscripción es obligatorio**: `is_active=False` no toca la preapproval, así que
+     sin eso MP le **sigue cobrando** a alguien que ya se fue. Es **best-effort**: si MP no
+     responde, la baja se persiste igual (revertirla por un fallo de un tercero sería peor) y
+     queda un log con "CANCELARLA A MANO".
+   - **La baja se revierte SOLO desde el panel admin** (`PATCH /users/{id}` con
+     `is_active: true`, que además limpia `deactivated_at`). Es imprescindible que exista: la
+     fila sigue ocupando el email (único), así que esa persona no puede entrar **ni volver a
+     registrarse**. Ver el TODO del `CLAUDE.md` raíz.
+   - **No pide la contraseña** para confirmar (decisión de producto 2026-08-14). El modal vive
+     detrás de una cookie viva; el riesgo asumido es una sesión abierta ajena.
 
 ## Claves temporales del panel admin (`must_change_password`)
 

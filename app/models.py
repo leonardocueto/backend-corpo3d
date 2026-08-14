@@ -17,6 +17,15 @@ class User(Base):
     # Nullable: un usuario creado por Google no tiene password (login solo OAuth).
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Fecha en que el usuario pidio la baja (POST /auth/deactivate). NULL = cuenta que
+    # nunca se dio de baja. Es una columna aparte de `is_active` a proposito: el bool
+    # es el INTERRUPTOR (lo lee `deps.py` en cada request y corta el acceso), esta es
+    # la CONSTANCIA de cuando entro el pedido. Sin fecha no se puede sostener el plazo
+    # del art. 16 de la Ley 25.326 (5 dias habiles para suprimir) ni saber a que filas
+    # les toca el borrado/anonimizado. Se limpia al reactivar desde el panel admin.
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # True = la clave actual es TEMPORAL: la genero un admin desde el panel y se la
     # mando al usuario por mail. El front (middleware global) no lo deja salir de

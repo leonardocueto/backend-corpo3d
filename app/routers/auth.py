@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import (
@@ -22,11 +23,19 @@ from app.email import (
     send_welcome_email,
 )
 from app.google_oauth import GoogleAuthError, verify_google_id_token
-from app.models import PasswordResetToken, PendingRegistration, Session, User
+from app.models import (
+    PasswordResetToken,
+    PendingRegistration,
+    Session,
+    Subscription,
+    User,
+)
 from app.otp import RedisUnavailableError, has_active_otp
 from app.otp import store_otp as redis_store_otp
 from app.otp import verify_otp as redis_verify_otp
 from app.ratelimit import limiter
+# `payments` no importa `auth`, asi que no hay ciclo.
+from app.routers.payments import cancel_preapproval
 from app.routers.tiers import sync_user_tier
 from app.schemas import (
     ChangePasswordIn,
@@ -54,6 +63,8 @@ from app.security import (
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+logger = logging.getLogger("auth")
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -477,6 +488,67 @@ def change_password(
     # bloqueo del front. Este es el camino normal para salir de must_change_password.
     user.must_change_password = False
     db.commit()
+
+
+@router.post("/deactivate", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("3/minute")
+def deactivate_account(
+    request: Request,
+    response: Response,
+    user: User = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+):
+    """Baja de la propia cuenta (self-service). BORRADO BLANDO, no `DELETE`.
+
+    Se conserva la fila porque `payments` y `export_logs` la referencian: un hard
+    delete los deja con `user_id=NULL` y se pierde a quien correspondia cada cobro,
+    que es justo lo que la normativa fiscal obliga a conservar. `is_active=False`
+    corta el acceso igual de rapido —`deps.py` lo valida en CADA request— y
+    `deactivated_at` deja la constancia de cuando entro el pedido.
+
+    Usa `get_current_user` y NO `require_legal_acceptance`, igual que `/logout` y
+    `/accept-legal`: obligar a aceptar un contrato para poder irse seria coercitivo.
+    Un usuario trabado en /politicas tiene que poder darse de baja.
+
+    OJO: `is_active=False` no toca la preapproval, asi que sin cancelarla MP le
+    seguiria cobrando a alguien que ya se fue. La cancelacion es best-effort: si MP
+    no responde, la baja se persiste igual (revertirla por un fallo de un tercero
+    seria peor) y queda el log para resolverlo a mano.
+    """
+    sub = db.scalar(
+        select(Subscription).where(
+            Subscription.user_id == user.id,
+            Subscription.mp_status == "authorized",
+        )
+    )
+    if sub is not None and not cancel_preapproval(sub):
+        logger.error(
+            "Baja de cuenta %s: no se pudo cancelar la suscripcion %s en MP. "
+            "CANCELARLA A MANO en el panel de Mercado Pago.",
+            user.id, sub.mp_preapproval_id,
+        )
+
+    now = datetime.now(timezone.utc)
+    user.is_active = False
+    user.deactivated_at = now
+    # La sesion actual moriria igual en el proximo request por el chequeo de
+    # `is_active` en deps.py, pero se revocan todas explicitamente: deja el motivo
+    # asentado en la tabla y no depende de que ese chequeo siga estando.
+    db.execute(
+        update(Session)
+        .where(Session.user_id == user.id, Session.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    db.commit()
+
+    response.delete_cookie(
+        key=settings.cookie_name,
+        path="/",
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        domain=settings.cookie_domain,
+    )
 
 
 @router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)

@@ -86,6 +86,9 @@ def list_users(
             terms_version=u.terms_version,
             privacy_accepted_at=u.privacy_accepted_at,
             privacy_version=u.privacy_version,
+            # Tampoco vienen en `base`: UserOut no expone el estado de la cuenta.
+            is_active=u.is_active,
+            deactivated_at=u.deactivated_at,
         )
 
     return UsersPage(
@@ -137,7 +140,7 @@ def update_user(
     db: DbSession = Depends(get_db),
     current: User = Depends(require_admin),
 ):
-    """Modifica email, nombre y/o acceso admin (parcial)."""
+    """Modifica email, nombre, acceso admin y/o estado de la cuenta (parcial)."""
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
@@ -147,6 +150,18 @@ def update_user(
     # No permitir auto-quitarse el admin (evita quedarse sin ningun admin).
     if user_id == current.id and data.get("is_admin") is False:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="No podes quitarte tu propio admin")
+
+    # Tampoco auto-desactivarse: seria un logout permanente del que no se puede
+    # volver sin otro admin (o sin tocar la DB a mano).
+    if user_id == current.id and data.get("is_active") is False:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail="No podes desactivar tu propio usuario"
+        )
+
+    # Reactivar tiene que LIMPIAR la fecha de baja: si no, queda una cuenta activa
+    # con constancia de baja, y el futuro job de supresion la barreria igual.
+    if data.get("is_active") is True:
+        user.deactivated_at = None
 
     # Email unico (si cambia, chequear que no lo tenga otro usuario).
     new_email = data.get("email")

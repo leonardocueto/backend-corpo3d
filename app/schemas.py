@@ -145,6 +145,11 @@ class UserUpdate(BaseModel):
     email: EmailStr | None = None
     full_name: str | None = None
     is_admin: bool | None = None
+    # Unica via para REACTIVAR una cuenta dada de baja (POST /auth/deactivate la
+    # pone en False). Sin esto la baja seria irreversible incluso para un admin, y
+    # un usuario que se da de baja por error quedaria sin salida: no puede entrar
+    # ni volver a registrarse, porque la fila sigue ocupando el email (unico).
+    is_active: bool | None = None
 
 
 class PasswordUpdate(BaseModel):
@@ -193,6 +198,10 @@ class AdminUserOut(UserOut):
     terms_version: str | None = None
     privacy_accepted_at: datetime | None = None
     privacy_version: str | None = None
+    # Estado de la cuenta. Van aca y NO en UserOut: un usuario inactivo no puede
+    # autenticarse, asi que el front nunca tendria como leer su propio flag.
+    is_active: bool = True
+    deactivated_at: datetime | None = None
 
 
 class UsersPage(BaseModel):

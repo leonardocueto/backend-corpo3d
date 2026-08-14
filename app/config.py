@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     # que se publican en /terminos y /privacidad.
     # Van SEPARADAS a proposito: los dos documentos cambian por su cuenta, y subir
     # uno solo tiene que pedir la re-aceptacion de ese, no de los dos.
-    terms_version: str = "2026-08-07"
+    # 2026-08-14: la baja de cuenta paso a ser self-service (§14.1 decia que habia
+    # que escribir a contacto@).
+    terms_version: str = "2026-08-14"
     # 2026-08-14: se corrigieron los encargados de tratamiento (salieron Vercel, que
     # dejo de serlo con la migracion a Cloudflare Pages, y Google, cuyo login nunca se
     # implemento). Subir la version es lo que dispara la re-aceptacion de ESE documento.

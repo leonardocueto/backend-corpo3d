@@ -85,6 +85,37 @@ def _get_sdk() -> "mercadopago.SDK":
     return _sdk
 
 
+def cancel_preapproval(sub: Subscription) -> bool:
+    """Cancela la preapproval en MP y marca la `Subscription` local. Devuelve si salio.
+
+    **NUNCA levanta**: los tres llamadores necesitan decidir por su cuenta que hacer
+    con el fallo, y dos de ellos ya persistieron algo que importa mas que el corte
+    del cobro.
+      - `POST /payments/cancel-subscription` -> traduce el False a un 502.
+      - `_apply_refund` (webhook) -> best-effort: la revocacion del tier ya esta.
+      - `POST /auth/deactivate` -> best-effort: la baja de la cuenta ya esta.
+
+    NO commitea: el llamador decide cuando. Idempotente: si la sub ya esta cancelada
+    no le pega a MP.
+    """
+    if sub.mp_status == "cancelled":
+        return True
+    try:
+        result = _get_sdk().preapproval().update(
+            sub.mp_preapproval_id, {"status": "cancelled"}
+        )
+    except Exception:  # noqa: BLE001 - el llamador decide si es fatal
+        logger.exception("Error cancelando preapproval (sub %s)", sub.id)
+        return False
+    if result.get("status") not in (200, 201):
+        logger.error(
+            "MP preapproval cancel fallo (sub %s): %s", sub.id, result.get("response")
+        )
+        return False
+    sub.mp_status = "cancelled"
+    return True
+
+
 def _price_for(plan: str) -> int:
     return settings.price_mensual if plan == "mensual" else settings.price_anual
 
@@ -290,12 +321,7 @@ def cancel_subscription(
             detail="No tenes una suscripcion activa",
         )
 
-    sdk = _get_sdk()
-    result = sdk.preapproval().update(
-        sub.mp_preapproval_id, {"status": "cancelled"}
-    )
-    if result.get("status") not in (200, 201):
-        logger.error("MP preapproval cancel fallo: %s", result.get("response"))
+    if not cancel_preapproval(sub):
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             detail="No se pudo cancelar la suscripcion",
@@ -309,7 +335,6 @@ def cancel_subscription(
     # `user_is_unlimited` deja de verlo ilimitado (la sub ya no esta `authorized`
     # y el tier quedo vencido). La revocacion INMEDIATA queda reservada al
     # reembolso/contracargo (`_apply_refund`), cuando la plata vuelve.
-    sub.mp_status = "cancelled"
 
     tier = db.scalar(select(UserTier).where(UserTier.user_id == user.id))
     expires_str = format_date(tier.expires_at) if tier else ""
@@ -550,22 +575,10 @@ def _apply_refund(
             )
             .order_by(Subscription.created_at.desc())
         )
-    if sub is not None and sub.mp_status != "cancelled":
-        try:
-            cancel_result = _get_sdk().preapproval().update(
-                sub.mp_preapproval_id, {"status": "cancelled"}
-            )
-            if cancel_result.get("status") in (200, 201):
-                sub.mp_status = "cancelled"
-            else:
-                logger.error(
-                    "MP preapproval cancel en reembolso fallo (sub %s): %s",
-                    sub.id, cancel_result.get("response"),
-                )
-        except Exception:  # noqa: BLE001 - best-effort, no romper el webhook
-            logger.exception(
-                "Error cancelando preapproval en reembolso (sub %s)", sub.id
-            )
+    if sub is not None:
+        # Best-effort: si MP no responde se loguea y sigue. La revocacion del tier
+        # ya esta en la sesion y es lo que no puede perderse.
+        cancel_preapproval(sub)
 
     db.commit()
     logger.info(
