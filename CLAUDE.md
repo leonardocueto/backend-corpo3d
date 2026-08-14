@@ -95,6 +95,10 @@ backend/
   usa outer join; filas huérfanas muestran "Usuario eliminado" en el panel admin.
 - **UserTier** ganó `subscription_id` (FK `subscriptions.id` ON DELETE SET NULL, nullable) —
   linkea la suscripción activa que alimenta el tier.
+- **WithdrawalRequest** (migración `0015`): `id` (UUID), `full_name`, `email` (indexado, **no**
+  único), `reason` (nullable — el art. 34 permite revocar sin justificar), `created_at`
+  (indexed), `resolved_at` (nullable, lo estampa un admin). **Sin FK a `users`** (mismo criterio
+  que `PendingRegistration`): el endpoint es público y quien revoca puede no tener sesión.
 
 ## Flujo de auth
 
@@ -380,10 +384,25 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   como paso aparte; una sola acción (reembolsar) devuelve la plata, baja el tier y frena la
   renovación.
 - **Botón de arrepentimiento** (Ley 24.240 art. 34 + Res. 424/2020): `POST /payments/withdrawal`
-  (endpoint **público**, sin sesión, rate-limit 3/min). Recibe `full_name`, `email` y `reason`;
-  manda email a `info@corpolab3d.com` con los datos (template `withdrawal_request.html`). El
-  reembolso se gestiona manual desde el panel de MP. El front tiene la página `/arrepentimiento`
-  con formulario + links en el footer de la landing y en `/pricing`.
+  (endpoint **público**, sin sesión, rate-limit 3/min). Recibe `full_name`, `email` y `reason`.
+  El front tiene la página `/arrepentimiento` con formulario + links en el footer de la landing
+  y en `/pricing`.
+  - **La FILA en `withdrawal_requests` es el registro legal; el mail es solo la notificación**
+    (migración `0015`, 2026-08-14). El orden está fijado y **no se invierte**: `db.commit()`
+    **antes** de encolar `send_withdrawal_request_email`. Antes de esto el endpoint solo mandaba
+    el mail y respondía 204 sin escribir nada; como `_send` traga los errores por diseño, una
+    caída de Resend dejaba al cliente con un éxito falso y la solicitud sin rastro en ningún
+    lado. Con un plazo legal de 10 días corridos, eso no es un mail perdido: es un
+    incumplimiento que además no se puede auditar. Si el commit falla ahora propaga **500** y el
+    cliente ve el error (reintenta) en vez del cartel de "listo".
+  - **Panel admin**: `GET /payments/withdrawals` (paginado, filtro `pending`) y
+    `PATCH /payments/withdrawals/{id}` (`{"resolved": bool}`; `false` **reabre** una cerrada por
+    error). Ambos con `require_admin` a nivel **endpoint**, no de router — este módulo tiene
+    rutas públicas. La página del front es `/admin/arrepentimientos` y **resalta las pendientes
+    que pasaron los 10 días**.
+  - **El reembolso y la cancelación de la suscripción siguen siendo manuales** en el panel de MP;
+    resolver la solicitud solo cierra el registro. (Automatizar la cancelación al registrarla se
+    evaluó y quedó fuera de alcance a propósito.)
 
 **Estado (2026-07-24): legacy PROBADO, suscripciones por probar con credenciales de producción.**
 `MP_ACCESS_TOKEN` y `MP_WEBHOOK_SECRET` se cargan a mano en Render (`sync: false`).

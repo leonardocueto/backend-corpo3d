@@ -349,3 +349,28 @@ class WithdrawalRequestIn(BaseModel):
     # Opcional a proposito: el art. 34 permite revocar SIN justificar. Pedirlo como
     # requisito bloquearia el ejercicio del derecho.
     reason: str | None = Field(default=None, max_length=2000)
+
+
+class WithdrawalRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    full_name: str
+    email: str
+    reason: str | None
+    created_at: datetime
+    resolved_at: datetime | None
+
+
+class WithdrawalRequestsPage(BaseModel):
+    items: list[WithdrawalRequestOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class ResolveWithdrawalIn(BaseModel):
+    """`false` reabre una solicitud cerrada por error: el plazo legal corre igual,
+    asi que cerrarla de forma irreversible seria peor que poder deshacerlo."""
+
+    resolved: bool
