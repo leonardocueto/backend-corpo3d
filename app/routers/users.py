@@ -80,6 +80,12 @@ def list_users(
             tier_expires_at=tier_obj.expires_at if tier_obj else None,
             export_remaining=None if unlimited else remaining_for(win_by_user.get(u.id), now),
             export_unlimited=unlimited,
+            # Explicitos: `base` trae los bools derivados de UserOut, no la
+            # evidencia cruda (fecha + version aceptada de cada documento).
+            terms_accepted_at=u.terms_accepted_at,
+            terms_version=u.terms_version,
+            privacy_accepted_at=u.privacy_accepted_at,
+            privacy_version=u.privacy_version,
         )
 
     return UsersPage(

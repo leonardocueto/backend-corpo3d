@@ -75,7 +75,8 @@ backend/
   usuarios creados por Google no tienen password), `is_active`, `is_admin`, `google_sub`
   (**único, nullable**: `sub` estable de la cuenta de Google para linkeo), `auth_provider`
   (`'password' | 'google'`, default `'password'`), `must_change_password` (default `false`,
-  migración `0013` — ver abajo), `created_at`. (Columnas de Google: migración
+  migración `0013` — ver abajo), `terms_accepted_at` + `terms_version` (nullable, migración
+  `0014` — ver abajo), `created_at`. (Columnas de Google: migración
   `0007_google_oauth`; **latentes**, hoy todos los users son `auth_provider='password'` — el login
   con Google no esta activo, ver flujo de auth #6.)
 - **Session**: `id` (UUID), `user_id` (FK, `ON DELETE CASCADE`), `token_hash` (único),
@@ -117,6 +118,14 @@ backend/
    registrado"**; si hay un pendiente sin confirmar → se **invalida y se emite uno nuevo** (un
    solo link vivo a la vez, patrón de `forgot-password`). No acepta `is_admin`/`tier`
    (anti-escalada). Rate limit 5/min. Vida del token: `SIGNUP_TOKEN_MINUTES` (default 60).
+   - **Exige `accepted_terms: true` Y `accepted_privacy: true`** (uno por documento, migración
+     `0014`): sin el campo o con `false` → **422**, con el mensaje del documento que falta. En
+     `SignupIn` van como `Field(default=False, validate_default=True)`: **el `validate_default`
+     es imprescindible**, pydantic v2 **no corre los validators sobre los defaults** y omitir el
+     campo se salteaba el guard (medido: respondía 202). **Las VERSIONES no las manda el
+     cliente**: las estampa el servidor — un string de versión que sale del navegador no prueba
+     nada. Se guardan en el `PendingRegistration` y de ahí se copian al `User`. Detalle en
+     "Aceptación de los legales".
    - **`PendingRegistration`** (`models.py`, migración `0009`): espejo de `PasswordResetToken`
      pero **sin FK a `users`** (el usuario aún no existe). En DB solo el HMAC del token; `email`
      indexado NO único (se reusa tras confirmar/expirar). Se eligió tabla aparte (no `User`
@@ -132,6 +141,15 @@ backend/
      el caso idempotente) se encola `send_welcome_email` en BackgroundTask, después del commit.
      Solo aplica al signup público; las altas de admin (`/auth/register`, `POST /users`) no
      mandan bienvenida.
+   - **Aceptación de legales**: se copian las cuatro columnas del pending tal cual, **sin
+     re-estampar la fecha**. Lo que vale como aceptación es el momento del **clic en el
+     registro**, no el de la confirmación del mail (que puede ser una hora después).
+5c. `POST /auth/accept-legal`: acepta los legales desde `/politicas` (cuentas anteriores al
+   checkbox, altas hechas por admin, o subidas de versión de un documento). Usa
+   `get_current_user` y **no** `require_legal_acceptance` — exigir la aceptación para poder
+   aceptar sería un deadlock. Sella la versión vigente **solo de los documentos que vienen en
+   `true`**; devuelve el `UserOut` actualizado para que el front refresque su store sin una
+   segunda llamada a `/auth/me`. Idempotente. Rate limit 10/min.
 6. `POST /auth/google`: login con **Google (OIDC)** — **NO IMPLEMENTADO / LATENTE**. El
    codigo del backend ya existe (`app/google_oauth.py`, endpoint, migracion `0007`, columnas
    `google_sub`/`auth_provider`) pero **no esta activo end-to-end**: el front no tiene boton de
@@ -193,6 +211,58 @@ Esa clave es **nuestra**, no del usuario: se la mandamos por mail y tiene que re
   privados **no** devuelven 403. El riesgo es nulo — el usuario ya se autenticó con una clave
   que le dimos nosotros, y lo que se busca es que elija una propia, no contener a un atacante.
   Si algún día hace falta endurecerlo, va como dependency en `deps.py`, no endpoint por endpoint.
+
+## Aceptación de los legales (migración `0014`)
+
+Evidencia de que el usuario **vio y aceptó** los Términos y la Privacidad. No es cosmético: los
+Términos §1 afirman que crear una cuenta implica aceptarlos, y las cláusulas que más protegen
+(§12 validación de fabricación, §15 limitación de responsabilidad) son **inoponibles si no se
+puede probar que se exhibieron**. Antes de la `0014` el registro no mostraba ni exigía nada, así
+que esa aceptación no existía en ningún lado.
+
+**Cuatro columnas, dos por documento**: `terms_accepted_at` / `terms_version` y
+`privacy_accepted_at` / `privacy_version` (en `users` y en `pending_registrations`). Se guarda la
+**versión aceptada, no un bool** — eso es lo que permite pedir la re-aceptación cuando el
+documento cambia, sin backfill ni job.
+
+- **Estado derivado, no almacenado**: `User.terms_accepted` / `privacy_accepted` (propiedades en
+  `models.py`) comparan la versión guardada contra la vigente. Una versión vieja da `False` y el
+  usuario vuelve a pasar por `/politicas`. **Es la única definición de "aceptó"**: la usan tanto
+  `UserOut` (lo que ve el front) como el 403 del backend, así que no pueden opinar distinto.
+- **Dos versiones separadas** (`TERMS_VERSION` / `PRIVACY_VERSION` en `config.py`, ambas
+  `"2026-08-07"`): los documentos cambian por su cuenta y subir uno solo tiene que pedir la
+  re-aceptación de ese, no de los dos. **Las pone el servidor**, nunca el cliente. Tienen que
+  coincidir con las del front (`3D/app/utils/legal.ts`), que son las que se imprimen en
+  `/terminos` y `/privacidad`. **Si se actualiza un documento, se suben las dos.**
+- **Dónde se sella**: `POST /auth/signup` (el clic de los checkboxes; viaja por
+  `PendingRegistration` y `/auth/verify-signup` lo copia **sin re-estampar la fecha**) y
+  `POST /auth/accept-legal` (la pantalla `/politicas`, para cuentas que ya existían, altas de
+  admin, y subidas de versión). `accept-legal` solo toca los documentos que vienen en `true`:
+  aceptar uno deja el otro pendiente, y el usuario sigue bloqueado.
+- **ENFORCEMENT REAL: `require_legal_acceptance` en `deps.py` → 403 `legal_acceptance_required`.**
+  El middleware del front que manda a `/politicas` es solo UX — vive en el cliente, así que un
+  override de la respuesta de `/auth/me` (o pegarle a la API directo con la cookie) lo saltea.
+  El 403 no tiene nada que overridear: el estado se deriva en el servidor de lo que hay en DB.
+  Mismo criterio que el gate de `/exports/download`.
+  - `require_admin` y `get_paid_user` **cuelgan de esta dependency**, no de `get_current_user`,
+    para que el gate se herede solo en todo endpoint admin o de cuenta paga. Los admins **no**
+    están exentos.
+  - En `payments.py` y `exports.py` reemplaza a `get_current_user` endpoint por endpoint (ese
+    router tiene endpoints públicos: `/plans`, `/webhook`, `/withdrawal`).
+  - **Quedan afuera a propósito**: `/auth/me` (el front necesita leer los flags), `/auth/logout`
+    (poder salir siempre), `/auth/accept-legal` (sería un deadlock) y `/auth/change-password`
+    (una clave temporal de admin se cambia primero).
+- **Valores posibles de las columnas `*_version`**:
+  - la vigente → aceptación real, con su fecha.
+  - `"legacy-backfill"` → cuenta anterior al checkbox. La `0014` la dio por aceptada con
+    `*_accepted_at = created_at`. Es una aceptación **asumida por uso previo**, no un clic
+    registrado; se marca distinto a propósito (un registro que afirmara lo contrario sería peor
+    evidencia que ninguno). Al no coincidir con la vigente, igual pasa por `/politicas`.
+  - `NULL` → **no consta**. Altas hechas por admin (`/auth/register`, `POST /users`): no hay nadie
+    del otro lado aceptando. También caen en `/politicas` al entrar. El panel las muestra en rojo.
+- **Salida**: los **bools derivados** van en `UserOut` (los necesita el front para saber a dónde
+  mandar al usuario y qué checkbox mostrar); la **evidencia cruda** (fecha + versión aceptada de
+  cada documento) va solo en `AdminUserOut`.
 
 ## Exportaciones — gate de descarga (`app/routers/exports.py`)
 

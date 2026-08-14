@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.config import settings
 from app.database import get_db
-from app.deps import get_current_user, require_admin
+from app.deps import require_admin, require_legal_acceptance
 from app.email import (
     send_payment_approved_email,
     send_payment_rejected_email,
@@ -182,7 +182,7 @@ def list_payments(
 
 @router.post("/subscribe", response_model=SubscribeOut)
 def create_subscription(
-    payload: SubscribeIn, user: User = Depends(get_current_user),
+    payload: SubscribeIn, user: User = Depends(require_legal_acceptance),
     db: DbSession = Depends(get_db),
 ) -> SubscribeOut:
     """Crea una suscripcion recurrente de MP (preapproval standalone con
@@ -248,7 +248,7 @@ def create_subscription(
 
 @router.get("/subscription", response_model=SubscriptionOut | None)
 def get_subscription(
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_legal_acceptance),
     db: DbSession = Depends(get_db),
 ) -> SubscriptionOut | None:
     """Devuelve la suscripcion activa del usuario (la mas reciente no-cancelled),
@@ -270,7 +270,7 @@ def get_subscription(
 
 @router.post("/cancel-subscription", response_model=CancelSubscriptionOut)
 def cancel_subscription(
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_legal_acceptance),
     background: BackgroundTasks = BackgroundTasks(),
     db: DbSession = Depends(get_db),
 ) -> CancelSubscriptionOut:
@@ -323,7 +323,7 @@ def cancel_subscription(
 
 @router.post("/checkout")
 def create_checkout(
-    payload: SubscribeIn, user: User = Depends(get_current_user)
+    payload: SubscribeIn, user: User = Depends(require_legal_acceptance)
 ) -> dict:
     """DEPRECATED: pago unico. Se mantiene mientras el front viejo siga en prod."""
     sdk = _get_sdk()
