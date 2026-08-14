@@ -37,6 +37,7 @@ from app.schemas import (
     RegisterIn,
     ResendOtpIn,
     ResetPasswordIn,
+    AcceptLegalIn,
     SignupIn,
     UserOut,
     VerifyOtpIn,
@@ -352,6 +353,13 @@ def signup(
             token_hash=hash_token(token),
             expires_at=datetime.now(timezone.utc)
             + timedelta(minutes=settings.signup_token_minutes),
+            # Aceptacion de los legales: los bools ya los exigio SignupIn (422 si
+            # alguno no viene True). Las VERSIONES las pone el servidor, no el
+            # cliente. Se sellan las dos: el alta nueva nunca pasa por /politicas.
+            terms_accepted_at=datetime.now(timezone.utc),
+            terms_version=settings.terms_version,
+            privacy_accepted_at=datetime.now(timezone.utc),
+            privacy_version=settings.privacy_version,
         )
     )
     db.commit()
@@ -399,6 +407,12 @@ def verify_signup(
             # Ya viene hasheado del signup: NO re-hashear.
             password_hash=pending.password_hash,
             is_admin=False,  # forzado: el alta publica nunca crea admins
+            # Se copia el momento del SIGNUP (cuando tildo los checkboxes), no el
+            # de ahora: lo que vale como aceptacion es el clic, no la confirmacion.
+            terms_accepted_at=pending.terms_accepted_at,
+            terms_version=pending.terms_version,
+            privacy_accepted_at=pending.privacy_accepted_at,
+            privacy_version=pending.privacy_version,
         )
         db.add(user)
 
@@ -408,6 +422,40 @@ def verify_signup(
     # despues del commit para no mandarla si la transaccion falla. En BackgroundTask.
     if is_new:
         background.add_task(send_welcome_email, user.email, user.full_name)
+    return user
+
+
+@router.post("/accept-legal", response_model=UserOut)
+@limiter.limit("10/minute")
+def accept_legal(
+    request: Request,
+    payload: AcceptLegalIn,
+    user: User = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+):
+    """Acepta los legales desde /politicas: es la via para los usuarios que ya
+    tenian cuenta cuando el checkbox no existia, para las altas hechas por admin, y
+    para cuando sube la version de un documento.
+
+    Usa `get_current_user` y NO `require_legal_acceptance`, obviamente: exigir la
+    aceptacion para poder aceptar seria un deadlock.
+
+    Sella la version VIGENTE del servidor, no una que mande el cliente. Solo toca
+    los documentos que vienen en `true`: aceptar uno solo deja el otro pendiente (el
+    usuario sigue bloqueado, que es lo correcto) en vez de sellar los dos de prepo.
+    Idempotente: re-aceptar solo refresca la fecha."""
+    now = datetime.now(timezone.utc)
+    if payload.accept_terms:
+        user.terms_accepted_at = now
+        user.terms_version = settings.terms_version
+    if payload.accept_privacy:
+        user.privacy_accepted_at = now
+        user.privacy_version = settings.privacy_version
+    db.commit()
+    db.refresh(user)
+    # Devuelve el UserOut ya actualizado para que el front refresque su store sin
+    # una segunda llamada a /auth/me (y no quede el middleware rebotando con los
+    # flags viejos, el mismo pozo que ya tiene documentado must_change_password).
     return user
 
 

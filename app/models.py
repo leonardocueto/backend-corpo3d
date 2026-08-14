@@ -35,9 +35,46 @@ class User(Base):
     auth_provider: Mapped[str] = mapped_column(
         String(16), default="password", server_default="password", nullable=False
     )
+    # Aceptacion de los legales, UNA POR DOCUMENTO. Es la EVIDENCIA de que el
+    # usuario vio el contrato: sin esto, clausulas como la validacion de fabricacion
+    # o el limite de responsabilidad son dificiles de oponer. Se sella en el signup
+    # (el momento del clic real, no el de la confirmacion del mail) y viaja hasta
+    # aca por `PendingRegistration`, o en /auth/accept-legal para los que ya tenian
+    # cuenta. Se guarda la VERSION aceptada, no un bool: es lo que permite pedir la
+    # re-aceptacion cuando el documento cambia.
+    # NULL = no consta (altas por admin). 'legacy-backfill' = cuenta anterior al
+    # checkbox, dada por aceptada por uso previo (migracion 0014), NO un clic real.
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    terms_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    privacy_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    privacy_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    # Estado de aceptacion DERIVADO: se compara la version guardada contra la
+    # vigente. No es una columna bool a proposito — asi, cuando sube la version de
+    # un documento, el flag se apaga solo y el usuario tiene que volver a aceptar,
+    # sin backfill ni job. Un valor viejo ('legacy-backfill' o la version anterior)
+    # da False.
+    # Es la UNICA definicion de "acepto": la usan UserOut (lo que ve el front) y
+    # `require_legal_acceptance` (el 403 que hace de enforcement real). Que sean la
+    # misma fuente es lo que impide que el front y el backend opinen distinto.
+    @property
+    def terms_accepted(self) -> bool:
+        from app.config import settings
+
+        return self.terms_version == settings.terms_version
+
+    @property
+    def privacy_accepted(self) -> bool:
+        from app.config import settings
+
+        return self.privacy_version == settings.privacy_version
 
     sessions: Mapped[list["Session"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -108,6 +145,18 @@ class PendingRegistration(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Aceptacion de los legales: ocurre ACA (el usuario tildo los checkboxes y mando
+    # el form), pero el `User` recien nace al confirmar el mail. Se copian tal cual
+    # en /auth/verify-signup, igual que `password_hash`: lo que vale es el momento
+    # del clic, no el de la confirmacion.
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    terms_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    privacy_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    privacy_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class LoginOtp(Base):
