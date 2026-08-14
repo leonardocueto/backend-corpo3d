@@ -37,7 +37,10 @@ class Settings(BaseSettings):
     # Van SEPARADAS a proposito: los dos documentos cambian por su cuenta, y subir
     # uno solo tiene que pedir la re-aceptacion de ese, no de los dos.
     terms_version: str = "2026-08-07"
-    privacy_version: str = "2026-08-07"
+    # 2026-08-14: se corrigieron los encargados de tratamiento (salieron Vercel, que
+    # dejo de serlo con la migracion a Cloudflare Pages, y Google, cuyo login nunca se
+    # implemento). Subir la version es lo que dispara la re-aceptacion de ESE documento.
+    privacy_version: str = "2026-08-14"
 
     # OTP de login (2do factor por email). El codigo de 6 digitos vive poco y
     # admite pocos intentos (baja entropia: 1M de combinaciones).
