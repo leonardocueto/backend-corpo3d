@@ -1,13 +1,76 @@
+import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession, joinedload
 
+from app import turnstile
 from app.config import settings
 from app.database import get_db
 from app.models import Session, User
+from app.ratelimit import client_ip
 from app.security import hash_session_token
+
+logger = logging.getLogger("app.deps")
+
+
+def require_captcha(action: str) -> Callable[[Request], None]:
+    """Valida el token de Turnstile de un endpoint PUBLICO. Se aplica con
+    `dependencies=[Depends(require_captcha("login"))]` en el decorador de ruta,
+    para no tocar la firma de ningun handler ni chocar con `@limiter.limit(...)`.
+
+    `action` identifica el formulario de origen (max 32 chars, `[a-z0-9_-]`) y se
+    compara contra la que devuelve Cloudflare: sin eso, un token sacado de
+    `/recuperar` sirve para pegarle a `/signup`.
+
+    Dos niveles de apagado, los dos deliberados:
+
+    - Sin `TURNSTILE_SECRET_KEY` -> no-op total (ni siquiera sale a la red). Mismo
+      fail-open que `origin_guard.py`: dev y local andan sin configurar nada.
+    - Con la clave pero `TURNSTILE_ENFORCE=false` -> verifica y LOGUEA, pero nunca
+      rechaza. Es la fase de observacion: sirve para medir cuantos requests
+      legitimos fallarian antes de bloquear a nadie. Lo que hay que mirar en esos
+      logs es `ok=False` con `missing-input-response`, que casi siempre significa
+      que falta `NUXT_PUBLIC_TURNSTILE_SITE_KEY` en el build de ese entorno (se
+      hornea en build: si falta, el front no manda token y no hay error visible).
+
+    El detail del 403 es un codigo estable (`captcha_failed`) para que el front lo
+    distinga de otros 403, igual que `legal_acceptance_required`."""
+
+    def _dep(request: Request) -> None:
+        if not settings.turnstile_secret_key:
+            return
+
+        ip = client_ip(request)
+        result = turnstile.verify(
+            request.headers.get("cf-turnstile-response"), ip, action
+        )
+
+        if not settings.turnstile_enforce:
+            # Los fallos van en WARNING y los exitos en INFO A PROPOSITO: uvicorn
+            # deja el root logger en WARNING, asi que un INFO no se ve en los logs
+            # de Render — y el unico dato que importa de esta fase es justamente
+            # cuantos requests LEGITIMOS fallarian al activar el enforcement.
+            # Si esto fuera INFO, el modo observacion no observaria nada.
+            if result.ok:
+                logger.info("turnstile action=%s ok=True ip=%s (observacion)", action, ip)
+            else:
+                logger.warning(
+                    "turnstile action=%s ok=False errors=%s ip=%s (observacion: NO se rechaza)",
+                    action, result.error_codes, ip,
+                )
+            return
+
+        if not result.ok:
+            logger.warning(
+                "turnstile action=%s RECHAZADO errors=%s ip=%s",
+                action, result.error_codes, ip,
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="captcha_failed")
+
+    return _dep
 
 
 def get_current_user(request: Request, db: DbSession = Depends(get_db)) -> User:

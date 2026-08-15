@@ -28,7 +28,7 @@ def render_email(template_name: str, **ctx: object) -> str:
 
     Contexto global inyectado en todos los mails:
     - `assets_base_url`: base publica de los logos (`{FRONTEND_URL}/logo/...png`), el
-      CDN del front (Vercel + Cloudflare). Los mails NO cargan imagenes del backend.
+      CDN del front (Cloudflare Pages). Los mails NO cargan imagenes del backend.
     - `support_email`: casilla de contacto que muestra el footer.
     """
     template = _env.get_template(template_name)

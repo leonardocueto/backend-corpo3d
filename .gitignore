@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
 .venv/
+# Cubre .env y cualquier variante por entorno (.env.qa, .env.local, .env.staging...).
+# La negacion es imprescindible: .env.* tambien matchea .env.example, que SI va al repo.
 .env
+.env.*
+!.env.example
 *.log
 cloudflared.out
 graphify-out/

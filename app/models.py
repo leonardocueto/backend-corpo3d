@@ -17,6 +17,15 @@ class User(Base):
     # Nullable: un usuario creado por Google no tiene password (login solo OAuth).
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Fecha en que el usuario pidio la baja (POST /auth/deactivate). NULL = cuenta que
+    # nunca se dio de baja. Es una columna aparte de `is_active` a proposito: el bool
+    # es el INTERRUPTOR (lo lee `deps.py` en cada request y corta el acceso), esta es
+    # la CONSTANCIA de cuando entro el pedido. Sin fecha no se puede sostener el plazo
+    # del art. 16 de la Ley 25.326 (5 dias habiles para suprimir) ni saber a que filas
+    # les toca el borrado/anonimizado. Se limpia al reactivar desde el panel admin.
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # True = la clave actual es TEMPORAL: la genero un admin desde el panel y se la
     # mando al usuario por mail. El front (middleware global) no lo deja salir de
@@ -342,3 +351,34 @@ class ExportLog(Base):
     )
 
     user: Mapped["User | None"] = relationship()
+
+
+class WithdrawalRequest(Base):
+    """Solicitud de arrepentimiento (Ley 24.240 art. 34 + Res. 424/2020).
+
+    ESTA FILA ES EL REGISTRO LEGAL; el mail a info@ es solo la notificacion.
+    El orden importa y esta fijado en `POST /payments/withdrawal`: se commitea
+    ANTES de encolar el mail. Antes de esta tabla el endpoint solo mandaba el
+    mail, y como `_send` (app/email.py) traga los errores por diseno, una caida
+    de Resend dejaba al cliente con un 204 de exito y la solicitud sin rastro en
+    ningun lado. Con un plazo legal de 10 dias corridos, perderla no es un mail
+    perdido: es un incumplimiento que ademas no se puede ni auditar.
+
+    Sin FK a `users` a proposito (mismo criterio que PendingRegistration): el
+    endpoint es PUBLICO y quien revoca puede no tener sesion abierta. `email`
+    va indexado pero NO unico (se puede pedir mas de una vez).
+
+    `resolved_at` lo estampa un admin desde el panel cuando la solicitud quedo
+    gestionada (reembolso + cancelacion, ambos manuales en el panel de MP)."""
+
+    __tablename__ = "withdrawal_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    # Nullable a proposito: el art. 34 permite revocar SIN justificar.
+    reason: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True, nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

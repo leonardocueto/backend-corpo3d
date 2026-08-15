@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.config import settings
 from app.database import get_db
-from app.deps import require_admin, require_legal_acceptance
+from app.deps import require_admin, require_captcha, require_legal_acceptance
 from app.email import (
     send_payment_approved_email,
     send_payment_rejected_email,
@@ -33,7 +33,7 @@ from app.email import (
     send_withdrawal_request_email,
 )
 from app.mailing.render import format_amount, format_date
-from app.models import Payment, Subscription, User, UserTier
+from app.models import Payment, Subscription, User, UserTier, WithdrawalRequest
 from app.ratelimit import limiter
 from app.routers.tiers import (
     PAID_TIERS,
@@ -47,10 +47,13 @@ from app.schemas import (
     CancelSubscriptionOut,
     PaymentOut,
     PaymentsPage,
+    ResolveWithdrawalIn,
     SubscribeIn,
     SubscribeOut,
     SubscriptionOut,
     WithdrawalRequestIn,
+    WithdrawalRequestOut,
+    WithdrawalRequestsPage,
 )
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -80,6 +83,37 @@ def _get_sdk() -> "mercadopago.SDK":
     if _sdk is None:
         _sdk = mercadopago.SDK(settings.mp_access_token)
     return _sdk
+
+
+def cancel_preapproval(sub: Subscription) -> bool:
+    """Cancela la preapproval en MP y marca la `Subscription` local. Devuelve si salio.
+
+    **NUNCA levanta**: los tres llamadores necesitan decidir por su cuenta que hacer
+    con el fallo, y dos de ellos ya persistieron algo que importa mas que el corte
+    del cobro.
+      - `POST /payments/cancel-subscription` -> traduce el False a un 502.
+      - `_apply_refund` (webhook) -> best-effort: la revocacion del tier ya esta.
+      - `POST /auth/deactivate` -> best-effort: la baja de la cuenta ya esta.
+
+    NO commitea: el llamador decide cuando. Idempotente: si la sub ya esta cancelada
+    no le pega a MP.
+    """
+    if sub.mp_status == "cancelled":
+        return True
+    try:
+        result = _get_sdk().preapproval().update(
+            sub.mp_preapproval_id, {"status": "cancelled"}
+        )
+    except Exception:  # noqa: BLE001 - el llamador decide si es fatal
+        logger.exception("Error cancelando preapproval (sub %s)", sub.id)
+        return False
+    if result.get("status") not in (200, 201):
+        logger.error(
+            "MP preapproval cancel fallo (sub %s): %s", sub.id, result.get("response")
+        )
+        return False
+    sub.mp_status = "cancelled"
+    return True
 
 
 def _price_for(plan: str) -> int:
@@ -287,12 +321,7 @@ def cancel_subscription(
             detail="No tenes una suscripcion activa",
         )
 
-    sdk = _get_sdk()
-    result = sdk.preapproval().update(
-        sub.mp_preapproval_id, {"status": "cancelled"}
-    )
-    if result.get("status") not in (200, 201):
-        logger.error("MP preapproval cancel fallo: %s", result.get("response"))
+    if not cancel_preapproval(sub):
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             detail="No se pudo cancelar la suscripcion",
@@ -306,7 +335,6 @@ def cancel_subscription(
     # `user_is_unlimited` deja de verlo ilimitado (la sub ya no esta `authorized`
     # y el tier quedo vencido). La revocacion INMEDIATA queda reservada al
     # reembolso/contracargo (`_apply_refund`), cuando la plata vuelve.
-    sub.mp_status = "cancelled"
 
     tier = db.scalar(select(UserTier).where(UserTier.user_id == user.id))
     expires_str = format_date(tier.expires_at) if tier else ""
@@ -547,22 +575,10 @@ def _apply_refund(
             )
             .order_by(Subscription.created_at.desc())
         )
-    if sub is not None and sub.mp_status != "cancelled":
-        try:
-            cancel_result = _get_sdk().preapproval().update(
-                sub.mp_preapproval_id, {"status": "cancelled"}
-            )
-            if cancel_result.get("status") in (200, 201):
-                sub.mp_status = "cancelled"
-            else:
-                logger.error(
-                    "MP preapproval cancel en reembolso fallo (sub %s): %s",
-                    sub.id, cancel_result.get("response"),
-                )
-        except Exception:  # noqa: BLE001 - best-effort, no romper el webhook
-            logger.exception(
-                "Error cancelando preapproval en reembolso (sub %s)", sub.id
-            )
+    if sub is not None:
+        # Best-effort: si MP no responde se loguea y sigue. La revocacion del tier
+        # ya esta en la sesion y es lo que no puede perderse.
+        cancel_preapproval(sub)
 
     db.commit()
     logger.info(
@@ -757,16 +773,97 @@ def _handle_one_time_payment(
 # --- Boton de arrepentimiento (Ley 24.240 art. 34) ---
 
 
-@router.post("/withdrawal", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/withdrawal",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("withdrawal"))],
+)
 @limiter.limit("3/minute")
 def request_withdrawal(
     request: Request,
     payload: WithdrawalRequestIn,
     background: BackgroundTasks,
+    db: DbSession = Depends(get_db),
 ) -> None:
+    """Endpoint PUBLICO (sin sesion): quien revoca puede no tener cuenta abierta.
+
+    ORDEN CRITICO: se COMMITEA ANTES de encolar el mail, y no al reves. La fila es
+    el registro legal; el mail es solo la notificacion. `_send` (app/email.py) traga
+    los errores por diseno, asi que si el mail fuera lo unico, una caida de Resend
+    devolveria un 204 de exito con la solicitud perdida y sin rastro — y el plazo del
+    art. 34 es de 10 dias corridos. Si el commit falla, propaga 500 y el cliente ve
+    el error (que es lo que queremos: reintenta).
+    """
+    row = WithdrawalRequest(
+        full_name=payload.full_name,
+        email=payload.email,
+        reason=payload.reason,
+    )
+    db.add(row)
+    db.commit()
     background.add_task(
         send_withdrawal_request_email,
         payload.full_name,
         payload.email,
         payload.reason,
     )
+
+
+@router.get(
+    "/withdrawals",
+    response_model=WithdrawalRequestsPage,
+    dependencies=[Depends(require_admin)],
+)
+@limiter.limit(LIST_LIMIT)
+def list_withdrawals(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    pending: bool | None = Query(None),
+    db: DbSession = Depends(get_db),
+) -> WithdrawalRequestsPage:
+    """Solicitudes de arrepentimiento paginadas (admin-only). `require_admin` a nivel
+    ENDPOINT porque este modulo tiene rutas publicas (/plans, /webhook, /withdrawal)."""
+    if pending is None:
+        filters = []
+    elif pending:
+        filters = [WithdrawalRequest.resolved_at.is_(None)]
+    else:
+        filters = [WithdrawalRequest.resolved_at.is_not(None)]
+    total = (
+        db.scalar(select(func.count()).select_from(WithdrawalRequest).where(*filters)) or 0
+    )
+    rows = db.scalars(
+        select(WithdrawalRequest)
+        .where(*filters)
+        .order_by(WithdrawalRequest.created_at.desc(), WithdrawalRequest.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return WithdrawalRequestsPage(
+        items=[WithdrawalRequestOut.model_validate(r) for r in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.patch(
+    "/withdrawals/{request_id}",
+    response_model=WithdrawalRequestOut,
+    dependencies=[Depends(require_admin)],
+)
+def resolve_withdrawal(
+    request_id: uuid.UUID,
+    payload: ResolveWithdrawalIn,
+    db: DbSession = Depends(get_db),
+) -> WithdrawalRequest:
+    """Marca la solicitud como gestionada (o la reabre). El reembolso y la
+    cancelacion de la suscripcion siguen siendo manuales en el panel de MP."""
+    row = db.get(WithdrawalRequest, request_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Solicitud no encontrada")
+    row.resolved_at = datetime.now(timezone.utc) if payload.resolved else None
+    db.commit()
+    db.refresh(row)
+    return row
