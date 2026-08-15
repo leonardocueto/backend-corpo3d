@@ -508,19 +508,59 @@ límite).
   CORS. **`/health` está exento** (el health check de Render pega directo, sin Cloudflare).
   NO validar `CF-Ray`: Render mete todo `*.onrender.com` detrás de su propio Cloudflare, así
   que ese header aparece por las dos puertas; el único discriminador es `x-origin-secret`.
-- **Anti-bot / captcha — decisión (2026-07-24): NO se usa reCAPTCHA.** Las capas actuales
-  alcanzan: **OTP por email** en login (2FA; brute-force de la password no sirve), **rate
-  limiting** slowapi por `CF-Connecting-IP` (no spoofable) en los 16 endpoints, y **Cloudflare**
-  (rate-limit 5/10s en `/auth/login` + Managed Challenge + `not cf.client.bot`).
-  `forgot-password`/`resend-otp` devuelven 204 (no enumeran cuentas). **Gatillo para agregar
-  captcha**: abuso real en los endpoints que **mandan emails** (`forgot-password`/`resend-otp`
-  → mail-bombing a una víctima o quemar la cuota de Resend), donde el rate limit **por IP** no
-  frena una botnet distribuida. En ese caso usar **Cloudflare Turnstile en modo INVISIBLE** (NO
-  Google reCAPTCHA: ya estás en Cloudflare, es gratis y privacy-friendly; y el front prohíbe
-  campos visibles extra en las pantallas de auth, ver `3D/CLAUDE.md`) y **validar el token en el
-  backend** (un captcha solo en el front es bypasseable; el guard de origen NO protege endpoints
-  públicos de forja). Hueco conocido: el Managed Challenge de Cloudflare está acotado a **fuera
-  de LATAM** → no desafía bots locales (AR/LATAM).
+- **Anti-bot / captcha: Cloudflare Turnstile INVISIBLE, IMPLEMENTADO (2026-08-15).** Ejecuta la
+  decisión que ya estaba tomada el 2026-07-24 (que descartaba reCAPTCHA). El **enforcement
+  arranca APAGADO**: se despliega en modo observación y se prende aparte (ver abajo).
+  - **Por qué Turnstile y no reCAPTCHA**: ya estamos en Cloudflare, es gratis sin tope útil (1M
+    siteverify/mes en Free) y no necesita cuenta de Google Cloud. reCAPTCHA recortó su free tier
+    a **10.000 assessments/mes el 2026-04-02** y, sin billing, pasado ese número devuelve **429 y
+    deja de proteger** (tope duro, no degrada); además el score queda en 4 valores. El front,
+    encima, prohíbe campos visibles extra en las pantallas de auth (ver `3D/CLAUDE.md`).
+  - **Piezas**: `app/turnstile.py` (capa aislada del proveedor, calcada de `app/email.py`;
+    `httpx` sync contra `challenges.cloudflare.com/turnstile/v0/siteverify`, `timeout=5` porque
+    corre en el camino crítico de un login) + `require_captcha(action)` en `app/deps.py`. Cero
+    dependencias nuevas.
+  - **Se aplica con `dependencies=[Depends(require_captcha("..."))]` en el decorador de ruta**,
+    no como parámetro del handler: así no toca ninguna firma ni choca con `@limiter.limit(...)`,
+    que exige `request: Request` como primer parámetro. En **9 endpoints públicos**: `login`,
+    `verify-otp`, `resend-otp`, `google`, `signup`, `verify-signup`, `forgot-password`,
+    `reset-password` (todos en `auth.py`) y `POST /payments/withdrawal`. **Per-endpoint, nunca a
+    nivel router**: `payments.py` mezcla rutas públicas y privadas (misma restricción que
+    `require_legal_acceptance`). `POST /auth/register` queda afuera (es admin-only).
+  - **El token viaja en el header `CF-Turnstile-Response`**, no en el body: cero cambios en los
+    9 schemas Pydantic y una sola lectura en la dependency. `allow_headers=["*"]` en el
+    `CORSMiddleware` ya lo cubre — **si algún día se enumeran los headers, hay que agregarlo o el
+    preflight rechaza todas las llamadas de auth** sin un error que apunte a la causa.
+  - **Dos niveles de apagado, los dos deliberados**: sin `TURNSTILE_SECRET_KEY` la dependency es
+    un **no-op** total (fail-open, igual que `origin_guard.py`: dev y local andan sin configurar
+    nada); con la clave pero `TURNSTILE_ENFORCE=false` **verifica y loguea pero NUNCA rechaza**.
+  - **Modo observación: los fallos se loguean en WARNING y los éxitos en INFO, a propósito.**
+    uvicorn deja el root logger en WARNING, así que un INFO **no se ve** en los logs de Render —
+    y el único dato que importa de esta fase es cuántos requests legítimos fallarían al activar
+    el enforcement. Con todo en INFO, el modo observación no observaría nada.
+  - **`ok=False` con `missing-input-response` casi siempre significa que falta
+    `NUXT_PUBLIC_TURNSTILE_SITE_KEY` en el build de ese entorno**, no un bot: esa var se hornea
+    en build (SPA) y si falta el front deja de mandar el token sin ningún error visible, mismo
+    pozo que `NUXT_PUBLIC_API_BASE`.
+  - **FAIL-OPEN si Cloudflare no responde** (timeout/red): `verify()` devuelve `ok=True`
+    **incluso con enforce activo**, y lo loguea con `error_codes=["unreachable"]`. Que Cloudflare
+    tenga un mal día no puede dejar a nadie sin poder registrarse ni recuperar su contraseña. Un
+    token inválido, en cambio, sí es `ok=False`.
+  - **Se compara la `action`** que devuelve Cloudflare contra la esperada: sin eso, un token
+    sacado en `/recuperar` sirve para pegarle a `/signup`. Si el widget no la manda, el chequeo
+    se saltea (degrada, no rompe).
+  - **Un widget por entorno** (prod y qa), con secret propio: mismo criterio que `ORIGIN_SECRET`,
+    una filtración desde QA no debe servir contra producción.
+  - **Sigue siendo una capa MÁS, no un reemplazo**: el OTP por email, el rate limiting de slowapi
+    por `CF-Connecting-IP` y las reglas de Cloudflare siguen todas activas. Lo que agrega es
+    justamente lo que faltaba: frenar una **botnet distribuida** contra los endpoints que mandan
+    mail (mail-bombing / quemar la cuota de Resend), donde el rate limit por IP no sirve. Hueco
+    que tapa: el Managed Challenge de Cloudflare está acotado a **fuera de LATAM**, así que hasta
+    ahora los bots locales (AR/LATAM) no veían ninguna fricción.
+  - **Validar en el backend es lo que hace que sirva**: un captcha que solo corre en el navegador
+    se saltea con un `curl`, y el guard de origen NO protege endpoints públicos de forja.
+  - **Pendiente**: pasar `TURNSTILE_ENFORCE=true` después del período de observación. Es una
+    decisión aparte (ver el TODO en el `CLAUDE.md` de la raíz), no parte de esta entrega.
 
 ## Despliegue / SameSite
 

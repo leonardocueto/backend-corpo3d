@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.config import settings
 from app.database import get_db
-from app.deps import require_admin, require_legal_acceptance
+from app.deps import require_admin, require_captcha, require_legal_acceptance
 from app.email import (
     send_payment_approved_email,
     send_payment_rejected_email,
@@ -773,7 +773,11 @@ def _handle_one_time_payment(
 # --- Boton de arrepentimiento (Ley 24.240 art. 34) ---
 
 
-@router.post("/withdrawal", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/withdrawal",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("withdrawal"))],
+)
 @limiter.limit("3/minute")
 def request_withdrawal(
     request: Request,

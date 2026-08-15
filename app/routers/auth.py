@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.config import settings
 from app.database import get_db
-from app.deps import get_current_user, require_admin
+from app.deps import get_current_user, require_admin, require_captcha
 from app.email import (
     send_login_otp_email,
     send_password_reset_email,
@@ -114,7 +114,11 @@ def _otp_required(user: User) -> bool:
     return settings.otp_enabled or user.is_admin
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    dependencies=[Depends(require_captcha("login"))],
+)
 @limiter.limit("5/minute")
 def login(
     request: Request,
@@ -148,7 +152,11 @@ def login(
     return LoginResponse(otp_required=True)
 
 
-@router.post("/verify-otp", response_model=UserOut)
+@router.post(
+    "/verify-otp",
+    response_model=UserOut,
+    dependencies=[Depends(require_captcha("verify_otp"))],
+)
 @limiter.limit("10/minute")
 def verify_otp(
     request: Request,
@@ -175,7 +183,11 @@ def verify_otp(
     return user
 
 
-@router.post("/resend-otp", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/resend-otp",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("resend_otp"))],
+)
 @limiter.limit("1/minute")
 def resend_otp(
     request: Request,
@@ -205,7 +217,11 @@ def resend_otp(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible")
 
 
-@router.post("/google", response_model=UserOut)
+@router.post(
+    "/google",
+    response_model=UserOut,
+    dependencies=[Depends(require_captcha("google_login"))],
+)
 @limiter.limit("10/minute")
 def google_login(
     request: Request,
@@ -326,7 +342,11 @@ def register(request: Request, payload: RegisterIn, db: DbSession = Depends(get_
     return user
 
 
-@router.post("/signup", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/signup",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_captcha("signup"))],
+)
 @limiter.limit("5/minute")
 def signup(
     request: Request,
@@ -379,7 +399,12 @@ def signup(
     background.add_task(send_signup_verification_email, payload.email, link)
 
 
-@router.post("/verify-signup", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/verify-signup",
+    response_model=UserOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_captcha("verify_signup"))],
+)
 @limiter.limit("10/minute")
 def verify_signup(
     request: Request,
@@ -551,7 +576,11 @@ def deactivate_account(
     )
 
 
-@router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/forgot-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("forgot_password"))],
+)
 @limiter.limit("3/minute")
 def forgot_password(
     request: Request,
@@ -587,7 +616,11 @@ def forgot_password(
         background.add_task(send_password_reset_email, user.email, link)
 
 
-@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/reset-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("reset_password"))],
+)
 @limiter.limit("5/minute")
 def reset_password(request: Request, payload: ResetPasswordIn, db: DbSession = Depends(get_db)):
     """Consume el token y setea la nueva contraseña. Token single-use + corto.

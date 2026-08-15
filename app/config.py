@@ -88,6 +88,17 @@ class Settings(BaseSettings):
     # el endpoint /auth/google responde 503 (la app arranca igual).
     google_client_id: str | None = None
 
+    # Cloudflare Turnstile (captcha invisible en los endpoints publicos). El
+    # secret es del widget; el site key es publico y vive en el front.
+    # FAIL-OPEN A PROPOSITO, igual que origin_secret: sin la clave la dependency
+    # `require_captcha` es un no-op y dev/local anda sin configurar nada.
+    # `turnstile_enforce` separa OBSERVAR de BLOQUEAR: con False (default) se
+    # verifica el token y se loguea el resultado, pero nunca se rechaza. Recien
+    # se pasa a True despues de mirar el trafico real (un umbral mal calibrado
+    # deja a gente sin poder registrarse ni recuperar su clave).
+    turnstile_secret_key: str | None = None
+    turnstile_enforce: bool = False
+
     # Guard de origen: el backend solo contesta a requests que pasaron por
     # Cloudflare (api.corpolab3d.com), que inyecta el header `x-origin-secret`.
     # Cierra el acceso directo a *.onrender.com (que saltea todas las reglas WAF).
