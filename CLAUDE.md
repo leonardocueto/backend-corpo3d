@@ -565,6 +565,43 @@ desde 2026-08-04 (antes: Render Oregon + Neon São Paulo, ~950 ms por endpoint; 
   - Rate limiting rule (0/1 del Free): `/auth/login` POST, 5/10s → Block (borde).
   - Transform Rule: inyecta `x-origin-secret` en `api.corpolab3d.com` (el guard de origen).
   - Cupos: custom 3/5 · rate-limiting 1/1 · transform 1/10.
+  - **Transform rules tras el alta de QA (2026-08-14): 3/10.** Se sumaron `Inyectar secreto de
+    origen QA` (request, `api-qa.corpolab3d.com`) y `noindex QA` (**response**,
+    `qa.corpolab3d.com` → `X-Robots-Tag`). Las custom rules **no** se tocaron, así que las que
+    filtran por path (`/admin`, `/ingresar`, el Skip de `/payments/webhook`) **también aplican a
+    los hostnames de QA**; la de "Challenge fuera de LATAM" no, porque está acotada a
+    `www.corpolab3d.com`.
+
+## Entorno de QA (2026-08-14)
+
+Servicio Render **`backend-corpolab3d-qa`** (plan **Free**, Ohio, deploya desde la rama **`qa`**),
+sirviendo `https://api-qa.corpolab3d.com` contra una DB Neon propia (`corpolab3d-qa`, Ohio).
+La topología completa —front, riesgos aceptados, cómo crear un admin— vive en el `CLAUDE.md` de
+la raíz → "Entorno de QA". Acá va solo lo que hace al backend.
+
+- **Creado A MANO en el dashboard, NO por `render.yaml`.** Ese blueprint declara
+  `name: backend-corpolab3d` y `plan: starter`: aplicarlo reconciliaría el servicio de
+  **producción**, no crearía uno nuevo. Mismo criterio que los crons desde 2026-08-04.
+- **Env vars propias**: `DATABASE_URL` (Neon QA), `SESSION_SECRET` (propio),
+  `CORS_ORIGINS=["https://qa.corpolab3d.com"]`, `FRONTEND_URL=https://qa.corpolab3d.com`,
+  `BACKEND_URL=https://api-qa.corpolab3d.com`, `ORIGIN_SECRET` (hex propio),
+  `REDIS_URL=...:6379/1`, `R2_*` (bucket y token propios), `RESEND_API_KEY` (key propia) y
+  `EMAIL_FROM=CorpoLab 3D QA <no-reply@corpolab3d.com>`. **`MP_*` sin cargar** → `/payments/*`
+  responde 503 en QA (ver TODO de la raíz).
+- **`ENVIRONMENT=production` también acá**, para que la cookie salga con `Secure` igual que en
+  producción. Ver el porqué en el `CLAUDE.md` de la raíz.
+- **El plan Free no tiene shell.** `scripts/create_admin.py` y cualquier script puntual se corren
+  **locales contra Neon QA** con la imagen de compose (`docker run --env-file ...`). Los crons
+  **no** existen en QA: si hiciera falta probar uno, mismo camino.
+- **Free duerme a los 15 min de inactividad**: el primer request paga ~40-50 s de arranque en
+  frío, encima del autosuspend de Neon. Cloudflare corta a los 100 s con **524**, así que un 524
+  aislado en el primer hit del día no es un bug del backend.
+- **El guard de origen funciona igual que en prod, con secreto propio.** Verificado el
+  2026-08-14: `api-qa.corpolab3d.com/auth/me` → **401**,
+  `backend-corpolab3d-qa.onrender.com/auth/me` → **403**.
+- **Sin `RESEND_API_KEY`, los 13 `send_*` loguean el link/código en vez de enviar** (el guard
+  mira solo la key, no `ENVIRONMENT`). Es una red de contención útil mientras se prueba lógica:
+  imposible mandarle un mail a un cliente por un typo. Al cargar la key esa red desaparece.
 
 ## Correo del dominio (corpolab3d.com)
 
