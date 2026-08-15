@@ -572,6 +572,26 @@ desde 2026-08-04 (antes: Render Oregon + Neon São Paulo, ~950 ms por endpoint; 
     los hostnames de QA**; la de "Challenge fuera de LATAM" no, porque está acotada a
     `www.corpolab3d.com`.
 
+## Flujo de ramas (aplica igual que en el front)
+
+**`qa` es TESTING, `dev` es STAGING.** `qa` es una rama **independiente**: no es un espejo de
+`dev` y nunca se resetea contra ella.
+
+**`feature/*` → `qa` → (Leo aprueba) → `dev` → `main`.** Se mergea la rama de feature a `qa`
+para probarla en `api-qa.corpolab3d.com`; **el merge a `dev` lo pide Leo explícitamente** y
+lleva la misma rama de feature, nunca `qa`.
+
+- **Prohibido** `git push origin origin/dev:qa --force` salvo pedido explícito de Leo.
+- **`dev` no se toca sin pedido explícito**, aunque el testing en `qa` haya salido bien.
+- Cuidado extra en este repo: **`dev` no deploya nada, pero `qa` y `main` sí**, y `start.sh`
+  corre `alembic upgrade head` al arrancar. O sea que **pushear a `qa` aplica las migraciones
+  pendientes contra la DB Neon de QA** (y pushear a `main`, contra la de producción). No es un
+  merge inocuo: si la migración es destructiva, el rollback es restaurar la DB.
+
+Regla completa, con el porqué y el incidente que la originó, en el `CLAUDE.md` de la raíz →
+"Flujo de ramas (Git)". **Es la única fuente de verdad**: si esta sección y esa difieren, manda
+la de la raíz.
+
 ## Entorno de QA (2026-08-14)
 
 Servicio Render **`backend-corpolab3d-qa`** (plan **Free**, Ohio, deploya desde la rama **`qa`**),
