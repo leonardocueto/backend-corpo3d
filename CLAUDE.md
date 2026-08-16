@@ -559,8 +559,16 @@ límite).
     ahora los bots locales (AR/LATAM) no veían ninguna fricción.
   - **Validar en el backend es lo que hace que sirva**: un captcha que solo corre en el navegador
     se saltea con un `curl`, y el guard de origen NO protege endpoints públicos de forja.
-  - **Pendiente**: pasar `TURNSTILE_ENFORCE=true` después del período de observación. Es una
-    decisión aparte (ver el TODO en el `CLAUDE.md` de la raíz), no parte de esta entrega.
+  - **Estado (2026-08-15): desplegado y VERIFICADO en QA y en producción**, los dos con
+    `TURNSTILE_ENFORCE=false`. La verificación que sirve es un probe **sin token** al endpoint
+    público: si devuelve 204 **y** aparece el WARNING `missing-input-response`, la secret está
+    cargada y el guard corre. Sin WARNING significa que `TURNSTILE_SECRET_KEY` **falta** y el
+    guard está en no-op — y como el enforcement está apagado, los dos casos responden
+    exactamente igual: **no hay ningún síntoma visible que los distinga**.
+  - **Pendiente: pasar `TURNSTILE_ENFORCE=true`.** Mientras siga en `false` esto **no protege
+    nada**, solo loguea. Antes de prenderlo en producción hay un **bloqueante en el front**:
+    mapear el 403 `captcha_failed`, que hoy no tiene UI. Detalle y orden en el `CLAUDE.md` de
+    la raíz → "TODO / pendiente".
 
 ## Despliegue / SameSite
 

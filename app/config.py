@@ -39,10 +39,16 @@ class Settings(BaseSettings):
     # 2026-08-14: la baja de cuenta paso a ser self-service (§14.1 decia que habia
     # que escribir a contacto@).
     terms_version: str = "2026-08-14"
-    # 2026-08-14: se corrigieron los encargados de tratamiento (salieron Vercel, que
-    # dejo de serlo con la migracion a Cloudflare Pages, y Google, cuyo login nunca se
-    # implemento). Subir la version es lo que dispara la re-aceptacion de ESE documento.
-    privacy_version: str = "2026-08-14"
+    # 2026-08-16: se activaron cookies de medicion (Google Analytics via GTM +
+    # Microsoft Clarity), declaradas en el §5.3 y aceptadas al usar el servicio /
+    # registrarse. NO hay banner de cookies (Argentina no tiene una norma tipo
+    # ePrivacy que lo obligue).
+    # La version anterior prometia en su §5.3 pedir el consentimiento ANTES de
+    # activar cookies de medicion. Esa promesa se RETIRA en esta version, asi que
+    # subir el numero no es cosmetico: la re-aceptacion en /politicas es LO UNICO
+    # que hace que los usuarios queden atados al texto nuevo y no a uno que ya no
+    # se cumple. Si esto no sube, la Politica publicada y la aceptada difieren.
+    privacy_version: str = "2026-08-16"
 
     # OTP de login (2do factor por email). El codigo de 6 digitos vive poco y
     # admite pocos intentos (baja entropia: 1M de combinaciones).
