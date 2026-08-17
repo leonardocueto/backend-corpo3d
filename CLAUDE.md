@@ -219,6 +219,40 @@ backend/
      registrarse**. Ver el TODO del `CLAUDE.md` raíz.
    - **No pide la contraseña** para confirmar (decisión de producto 2026-08-14). El modal vive
      detrás de una cookie viva; el riesgo asumido es una sesión abierta ajena.
+   - **UN ADMIN NO PUEDE DARSE DE BAJA (2026-08-17): 403.** Los guards del panel
+     (`PATCH /users/{id}`, `DELETE /users/{id}`) son del tipo "no te lo hagas a vos mismo", y
+     por eso el panel nunca llega a cero admins — pero **este endpoint no pasaba por ninguno**,
+     así que el único admin podía desactivarse a sí mismo y quedar sin poder entrar **ni como
+     usuario común** (se recupera con `scripts/create_admin.py` contra la DB, con otro email,
+     pero es una tarde perdida). La regla es **"los admins no se dan de baja solos"**, NO "se
+     bloquea solo al último": modela un offboarding real —otro admin revoca y queda registro de
+     quién lo hizo—, separa dos actos distintos (dejar de ser admin / dejar de ser usuario) y
+     evita la carrera del conteo, donde dos últimos admins simultáneos pasarían ambos el check.
+     El front oculta el botón en `ProfileModal` para no ofrecer una acción que siempre falla.
+
+9. **`POST /auth/reactivate`: reactivación self-service** (2026-08-17, rate-limit 5/min +
+   captcha). Endpoint **público** —quien lo llama está inactivo y no puede tener sesión— que se
+   autentica con email+password, igual que el login.
+   - **`deactivated_at` es el discriminador de TODO este flujo**, y por eso la columna existe
+     separada de `is_active`: **con fecha** = la baja la pidió el usuario y puede revivirla solo;
+     **`NULL`** = lo desactivó un admin y **no se auto-reactiva** (sería deshacer con un clic la
+     única herramienta de moderación que hay). El segundo caso responde 400.
+   - **NO inicia sesión** (204), igual que `/auth/verify-signup`: el front hace un login normal
+     después. Así el 2do factor de los admins y toda la lógica de `_otp_required` siguen en un
+     solo lugar, en vez de tener una segunda puerta que abra sesión sin pasar por ahí.
+   - **Idempotente**: si la cuenta ya está activa devuelve 204 sin tocar nada (doble clic, o un
+     admin que la reactivó entre medio).
+   - **No revive tiers ni suscripciones**: la preapproval se canceló en MP al darse de baja y no
+     se puede "descancelar". Vuelve como free. El front lo dice **antes** de que confirme.
+   - **`login` distingue los dos motivos**: 403 `account_deactivated` (baja propia → el front
+     ofrece el botón) vs 403 `"Usuario inactivo"` (baja por admin → no hay nada que hacer). El
+     chequeo va **después** de verificar el password, así que no filtra qué cuentas existen.
+   - **`forgot-password` dejó de mentir**: exigía `is_active` a secas, así que a una cuenta dada
+     de baja le respondía **204 sin mandar ningún mail** — la persona veía "te enviamos un mail"
+     y no llegaba nunca. Ahora también manda el link a las bajas **self-service** (las
+     desactivadas por un admin siguen afuera), y `reset-password` las acepta **pero NO las
+     reactiva**: cambiar la clave y volver a la app son dos decisiones distintas, y ese link se
+     puede abrir desde un mail viejo sin intención de volver.
 
 ## Claves temporales del panel admin (`must_change_password`)
 

@@ -139,7 +139,16 @@ def login(
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
     if not user.is_active:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+        # Se distinguen los dos motivos de inactividad, y el discriminador es
+        # `deactivated_at` (ver el endpoint /deactivate):
+        #   - CON fecha  -> la pidio el propio usuario. Puede revivirla el mismo
+        #     desde /auth/reactivate, asi que el front le ofrece el boton.
+        #   - SIN fecha  -> la desactivo un admin. NO se auto-reactiva: seria
+        #     deshacer con un clic la unica herramienta de moderacion que hay.
+        # Esto NO filtra que cuentas existen: para llegar aca hay que haber pasado
+        # la verificacion de password de arriba.
+        detail = "account_deactivated" if user.deactivated_at else "Usuario inactivo"
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
 
     if not _otp_required(user):
         _start_session(db, user, response)
@@ -553,6 +562,28 @@ def deactivate_account(
             user.id, sub.mp_preapproval_id,
         )
 
+    # Un ADMIN no puede darse de baja solo. Los guards del panel
+    # (`PATCH /users/{id}`, `DELETE /users/{id}`) son del tipo "no te lo hagas a
+    # vos mismo" y por eso el panel nunca llega a cero admins; este endpoint no
+    # pasaba por ninguno de ellos, asi que el unico admin podia desactivarse a si
+    # mismo y quedarse sin poder entrar ni como usuario comun (se recupera con
+    # scripts/create_admin.py contra la DB, pero es una tarde perdida).
+    #
+    # La regla es "los admins no se dan de baja solos", NO "solo se bloquea al
+    # ultimo": modela mejor un offboarding real —otro admin revoca el acceso y
+    # queda registro de quien lo hizo— y separa dos actos que no son lo mismo,
+    # dejar de ser admin y dejar de ser usuario. Quien quiera irse hace los dos,
+    # en ese orden. Ademas evita la carrera del conteo (dos ultimos admins
+    # dandose de baja a la vez pasarian los dos el check y quedaria cero).
+    #
+    # Consecuencia buscada: un admin nunca tiene `deactivated_at` con fecha, asi
+    # que nunca cae en el camino de auto-reactivacion de /auth/reactivate.
+    if user.is_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="Una cuenta de administrador no puede darse de baja",
+        )
+
     now = datetime.now(timezone.utc)
     user.is_active = False
     user.deactivated_at = now
@@ -577,6 +608,61 @@ def deactivate_account(
 
 
 @router.post(
+    "/reactivate",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("reactivate"))],
+)
+@limiter.limit("5/minute")
+def reactivate_account(
+    request: Request,
+    payload: LoginIn,
+    db: DbSession = Depends(get_db),
+):
+    """Revive una cuenta dada de baja por su propio dueno.
+
+    Endpoint PUBLICO: quien lo llama no puede tener sesion (esta inactivo). Se
+    autentica con las mismas credenciales del login, y por eso lleva el mismo
+    captcha y rate limit que el resto de los publicos.
+
+    NO INICIA SESION a proposito, igual que /auth/verify-signup: responde 204 y el
+    front hace un login normal despues. Asi el 2do factor de los admins y toda la
+    logica de `_otp_required` siguen viviendo en un solo lugar, en vez de tener una
+    segunda puerta que abre sesion sin pasar por ahi.
+
+    Solo revive bajas SELF-SERVICE (`deactivated_at` con fecha). Una cuenta
+    desactivada por un admin tiene `deactivated_at = NULL` y cae en el 400 generico:
+    dejarla auto-reactivarse convertiria la moderacion del panel en un boton de un
+    solo clic para el moderado.
+
+    NO reactiva tiers ni suscripciones: la preapproval se cancelo en MP al darse de
+    baja y no se puede "descancelar". El usuario vuelve como free y, si quiere, se
+    suscribe de nuevo. El front lo dice antes de que confirme.
+    """
+    user = db.scalar(select(User).where(User.email == payload.email))
+    # Password siempre verificado (aunque el user no exista) para no filtrar por
+    # timing que emails estan registrados. Mismo patron que el login.
+    if user is None or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
+
+    # Ya activa: idempotente, no es un error (doble click, o reactivada por un
+    # admin entre medio). El front sigue al login igual.
+    if user.is_active:
+        return
+
+    if user.deactivated_at is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail="La cuenta no puede reactivarse sola"
+        )
+
+    user.is_active = True
+    # Se limpia la constancia de baja: si no, queda una cuenta activa con fecha de
+    # baja y el futuro job de supresion la barreria igual. Mismo criterio que la
+    # reactivacion desde el panel (`PATCH /users/{id}`).
+    user.deactivated_at = None
+    db.commit()
+
+
+@router.post(
     "/forgot-password",
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require_captcha("forgot_password"))],
@@ -591,7 +677,18 @@ def forgot_password(
     """Pide un link de reset. Responde SIEMPRE 204, exista o no el email, para no
     filtrar que cuentas estan registradas (anti-enumeracion)."""
     user = db.scalar(select(User).where(User.email == payload.email))
-    if user is not None and user.is_active:
+    # Las cuentas dadas de baja POR SU DUENO tambien reciben el link. Antes se
+    # exigia `is_active` a secas y el endpoint respondia 204 sin mandar nada: la
+    # persona veia "te enviamos un mail" y no llegaba nunca, que es la peor forma
+    # de fallar. Quien se dio de baja y ademas olvido la clave necesita este
+    # camino para poder volver.
+    #
+    # El reset NO reactiva (ver /auth/reset-password): solo deja la clave nueva.
+    # Reactivar sigue siendo un acto deliberado desde el login.
+    #
+    # Las desactivadas por un admin (`deactivated_at IS NULL`) siguen afuera: no
+    # hay que darle a un usuario moderado una via para volver a entrar.
+    if user is not None and (user.is_active or user.deactivated_at is not None):
         # Invalida tokens previos sin usar de este usuario (un link vivo a la vez).
         db.execute(
             update(PasswordResetToken)
@@ -638,7 +735,12 @@ def reset_password(request: Request, payload: ResetPasswordIn, db: DbSession = D
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token invalido o expirado")
 
     user = db.get(User, reset.user_id)
-    if user is None or not user.is_active:
+    # Se acepta tambien la cuenta dada de baja por su dueno (ver /forgot-password),
+    # pero **no se reactiva aca**: cambiar la clave y volver a la app son dos
+    # decisiones distintas, y esta pantalla se puede abrir desde un mail viejo sin
+    # intencion de volver. La reactivacion se ofrece en el login, donde el usuario
+    # ve que su cuenta esta de baja y confirma.
+    if user is None or (not user.is_active and user.deactivated_at is None):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token invalido o expirado")
 
     user.password_hash = hash_password(payload.password)
