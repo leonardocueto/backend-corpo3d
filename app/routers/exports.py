@@ -185,6 +185,7 @@ def download_export(
     files: list[UploadFile] = File(...),
     structure_id: str = Form(...),
     project_name: str = Form(""),
+    hole_count: int = Form(0),
     user: User = Depends(require_legal_acceptance),
     db: DbSession = Depends(get_db),
 ) -> Response:
@@ -202,6 +203,15 @@ def download_export(
     # de intentos para que el front abra el modal de upsell correcto).
     if structure_id in PREMIUM_STRUCTURE_IDS and not unlimited:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="premium_structure")
+
+    # Agujeros (perforaciones de base y cuerpo): feature paga. A diferencia del
+    # PDF, que se filtra por extension, aca el gate se apoya en un campo QUE
+    # DECLARA EL CLIENTE: los agujeros van horneados dentro del STL y detectarlos
+    # de verdad exigiria parsear la malla. Un free decidido puede mandar 0 y
+    # llevarselos igual; lo que este gate si garantiza es que el camino normal
+    # este cerrado y que quede rastro en el ExportLog de quien exporto con ellos.
+    if hole_count > 0 and not unlimited:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="premium_holes")
 
     # Sanitizar el payload ANTES de debitar (un 4xx aca no consume intento).
     if len(files) == 0 or len(files) > MAX_EXPORT_FILES:
@@ -263,6 +273,7 @@ def download_export(
         "user_id": str(user.id),
         "project_name": project_name or None,
         "structure_id": structure_id,
+        "hole_count": hole_count,
         "file_count": len(entries),
         "generated_at": now.isoformat(),
         "downloaded_at": downloaded_at.isoformat(),
