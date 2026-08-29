@@ -6,9 +6,10 @@ Todos los endpoints requieren admin (dependency a nivel router). La salida usa
 
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
@@ -37,20 +38,82 @@ router = APIRouter(
 def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    status_filter: Literal["active", "inactive"] | None = Query(None, alias="status"),
+    tier_filter: Literal["free", "mensual", "anual"] | None = Query(None, alias="tier"),
+    search: str | None = Query(None, alias="q", max_length=120),
     db: DbSession = Depends(get_db),
 ):
     """Listado paginado de usuarios (mas nuevos primero), con sus intentos de
-    exportacion actuales (admin = ilimitado)."""
-    total = db.scalar(select(func.count()).select_from(User)) or 0
+    exportacion actuales (admin = ilimitado).
+
+    Filtros opcionales por estado de la cuenta, por tier y por texto (email o
+    nombre), combinables. El `total` que se devuelve es el del conjunto FILTRADO:
+    es el conteo que muestra el panel.
+    Los admins se filtran por su tier real (el "Admin" de la columna Tier es solo
+    una etiqueta de presentacion del front).
+    """
+    now = datetime.now(timezone.utc)
+    filters = []
+    if status_filter is not None:
+        filters.append(User.is_active.is_(status_filter == "active"))
+    if tier_filter is not None:
+        # OJO: un tier pago VENCIDO no cuenta como pago. `downgrade_if_expired` solo
+        # corre sobre las filas de la pagina que se carga (mas abajo), asi que en la
+        # DB quedan filas con tier='mensual' ya vencidas. Filtrar por el string a
+        # secas devolveria usuarios que esta misma respuesta muestra como 'free'
+        # (el downgrade los degrada antes de serializar). Se replica en SQL la misma
+        # condicion que `tier_is_unlimited`.
+        paid_now = and_(
+            UserTier.tier == tier_filter,
+            UserTier.expires_at.is_not(None),
+            UserTier.expires_at > now,
+        )
+        if tier_filter in PAID_TIERS:
+            filters.append(paid_now)
+        else:
+            # 'free' = todo lo que no es un tier pago vigente, INCLUIDO no tener fila
+            # en user_tiers (el caso mas comun: ver `to_item`, tier por defecto free).
+            filters.append(
+                or_(
+                    UserTier.user_id.is_(None),
+                    UserTier.tier == "free",
+                    UserTier.expires_at.is_(None),
+                    UserTier.expires_at <= now,
+                )
+            )
+    if search and search.strip():
+        # Busqueda parcial ("contiene") e insensible a mayusculas por email O
+        # nombre. `icontains` con autoescape trata % y _ como texto literal, asi
+        # que un usuario que los escriba no matchea de mas.
+        term = search.strip()
+        filters.append(
+            or_(
+                User.email.icontains(term, autoescape=True),
+                User.full_name.icontains(term, autoescape=True),
+            )
+        )
+
+    # `outerjoin` y no `join`: la ausencia de fila en user_tiers significa free, asi
+    # que un inner join perderia justo a la mayoria de los usuarios.
+    total = (
+        db.scalar(
+            select(func.count())
+            .select_from(User)
+            .outerjoin(UserTier, UserTier.user_id == User.id)
+            .where(*filters)
+        )
+        or 0
+    )
     rows = db.scalars(
         select(User)
+        .outerjoin(UserTier, UserTier.user_id == User.id)
+        .where(*filters)
         .order_by(User.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
 
     # Ventanas y tiers de los usuarios de esta pagina en una query c/u (evita N+1).
-    now = datetime.now(timezone.utc)
     ids = [u.id for u in rows]
     windows = (
         db.scalars(select(ExportWindow).where(ExportWindow.user_id.in_(ids))).all()
