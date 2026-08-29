@@ -40,13 +40,15 @@ def list_users(
     page_size: int = Query(20, ge=1, le=100),
     status_filter: Literal["active", "inactive"] | None = Query(None, alias="status"),
     tier_filter: Literal["free", "mensual", "anual"] | None = Query(None, alias="tier"),
+    search: str | None = Query(None, alias="q", max_length=120),
     db: DbSession = Depends(get_db),
 ):
     """Listado paginado de usuarios (mas nuevos primero), con sus intentos de
     exportacion actuales (admin = ilimitado).
 
-    Filtros opcionales por estado de la cuenta y por tier, combinables. El `total`
-    que se devuelve es el del conjunto FILTRADO: es el conteo que muestra el panel.
+    Filtros opcionales por estado de la cuenta, por tier y por texto (email o
+    nombre), combinables. El `total` que se devuelve es el del conjunto FILTRADO:
+    es el conteo que muestra el panel.
     Los admins se filtran por su tier real (el "Admin" de la columna Tier es solo
     una etiqueta de presentacion del front).
     """
@@ -79,6 +81,17 @@ def list_users(
                     UserTier.expires_at <= now,
                 )
             )
+    if search and search.strip():
+        # Busqueda parcial ("contiene") e insensible a mayusculas por email O
+        # nombre. `icontains` con autoescape trata % y _ como texto literal, asi
+        # que un usuario que los escriba no matchea de mas.
+        term = search.strip()
+        filters.append(
+            or_(
+                User.email.icontains(term, autoescape=True),
+                User.full_name.icontains(term, autoescape=True),
+            )
+        )
 
     # `outerjoin` y no `join`: la ausencia de fila en user_tiers significa free, asi
     # que un inner join perderia justo a la mayoria de los usuarios.
