@@ -293,6 +293,30 @@ documento cambia, sin backfill ni job.
   mandar al usuario y qué checkbox mostrar); la **evidencia cruda** (fecha + versión aceptada de
   cada documento) va solo en `AdminUserOut`.
 
+## Aviso de "plan por vencer" — `GET /tiers/me`
+
+Endpoint de **usuario** (no admin) que alimenta el aviso del front (modal + banner a <=5 dias
+del vencimiento). Devuelve `MyTierOut {tier, expires_at, auto_renew}`. **Sin migracion**: las
+tres columnas ya existian.
+
+- **Por que un endpoint nuevo y no `UserOut`**: `/auth/me` corre en **cada arranque de la SPA**
+  para todos los usuarios, y esto llama a `sync_user_tier`, que **puede commitear** (el downgrade
+  de un tier vencido es perezoso, on read). Meter eso en el camino critico del boot, para un
+  cartel que ve una minoria, no compensa — y ademas `UserOut` se mantiene minimo a proposito.
+- **Por que no `SubscriptionOut`**: `GET /payments/subscription` filtra `mp_status != "cancelled"`
+  y devuelve `None`. La audiencia del aviso es, en buena parte, gente con la suscripcion
+  cancelada: ese endpoint devolveria `null` justo para quienes hay que avisarles.
+- **`sync_user_tier` no es opcional.** Sin el, un plan que vencio anoche reporta `tier='mensual'`
+  con un `expires_at` pasado y el front calcula dias negativos.
+- **`auto_renew` usa el MISMO criterio que `scripts/notify_expiring.py`**: cualquier
+  `Subscription` en `authorized` del usuario, no solo la linkeada en `tier.subscription_id`. Si
+  los dos divergieran, un usuario recibiria el mail y no el cartel, o al reves.
+- **La audiencia son los dos casos en que el plan de verdad se termina**: (a) premium asignado a
+  mano por un admin (nunca hubo suscripcion) y (b) el que cancelo la renovacion (conserva el
+  acceso hasta `expires_at`). Con debito automatico no se avisa nada: MP cobra solo.
+- **El umbral del front es 5 dias; el del mail (`TIER_EXPIRY_WARNING_DAYS`) sigue en 10.** Son
+  avisos distintos y no se tocan entre si.
+
 ## Exportaciones — gate de descarga (`app/routers/exports.py`)
 
 **`POST /exports/download` es el punto de enforcement REAL de la descarga** (agregado el

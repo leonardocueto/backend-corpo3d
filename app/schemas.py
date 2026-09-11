@@ -252,6 +252,21 @@ class UserTierOut(BaseModel):
     expires_at: datetime | None
 
 
+class MyTierOut(BaseModel):
+    """Estado de plan del usuario logueado (GET /tiers/me). Lo consume el aviso de
+    "plan por vencer" del front.
+
+    Separado de `UserTierOut` a proposito: ese es el contrato del PUT admin y no
+    necesita el lookup de suscripcion. `paid_at` no va (el front no lo muestra) y
+    `unlimited` TAMPOCO: ese concepto ya lo sirve `/exports/attempts`, y duplicarlo
+    aca dejaria dos definiciones de "cuenta paga" en el front que pueden discrepar
+    mientras una de las dos esta en vuelo."""
+
+    tier: str  # 'free' | 'mensual' | 'anual', YA reconciliado por sync_user_tier
+    expires_at: datetime | None
+    auto_renew: bool  # hay una Subscription 'authorized' -> no hay nada que avisar
+
+
 # --- Disenos guardados (cuentas pagas) ---
 
 
