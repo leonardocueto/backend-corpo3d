@@ -38,6 +38,7 @@ PREMIUM_STRUCTURE_IDS = {
     "snap-lip",
     "deep-base",
     "neon-3d",
+    "neon-3d-interior",
     "corporea-aluminio",
 }
 

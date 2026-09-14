@@ -2,15 +2,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
-from app.deps import require_admin
+from app.deps import require_admin, require_legal_acceptance
 from app.models import Subscription, User, UserTier
-from app.schemas import SetTierIn, UserTierOut
+from app.ratelimit import limiter
+from app.schemas import MyTierOut, SetTierIn, UserTierOut
 
 # Tiers de usuario. Autoridad dual: suscripcion MP activa (primario) +
 # `expires_at` como safety net (fallback para legacy one-time y webhook que
@@ -22,6 +23,10 @@ PAID_TIERS = {"mensual", "anual"}
 # Duracion de cada tier pago (timedelta, sin dependencia extra; si se quiere
 # mes/año calendario exacto, usar python-dateutil relativedelta).
 TIER_DURATION = {"mensual": timedelta(days=30), "anual": timedelta(days=365)}
+
+# Limite por IP de GET /me. Lo llama el navbar una vez por carga de pagina, asi
+# que 30/min deja lugar de sobra para navegar y acota un loop accidental.
+ME_LIMIT = "30/minute"
 
 
 class PlanCopy(NamedTuple):
@@ -167,6 +172,54 @@ def _get_or_create_locked(db: DbSession, user_id: uuid.UUID) -> UserTier:
             select(UserTier).where(UserTier.user_id == user_id).with_for_update()
         )
     return tier
+
+
+@router.get("/me", response_model=MyTierOut)
+@limiter.limit(ME_LIMIT)
+def my_tier(
+    request: Request,
+    user: User = Depends(require_legal_acceptance),
+    db: DbSession = Depends(get_db),
+) -> MyTierOut:
+    """Estado de plan del usuario logueado. Lo consume el aviso de "plan por vencer"
+    del front (modal + banner a <=5 dias del vencimiento).
+
+    Va aca y no en `UserOut` a proposito: `/auth/me` corre en CADA arranque de la
+    SPA para todos los usuarios, y este endpoint llama a `sync_user_tier`, que
+    puede COMMITEAR (el downgrade de un tier vencido es perezoso, on read). Meter
+    eso en el camino critico del boot, para un cartel que ve una minoria, no vale
+    la pena; ademas `UserOut` se mantiene minimo a proposito (ver backend/CLAUDE.md).
+
+    Tampoco sirve `GET /payments/subscription`: filtra las suscripciones
+    `cancelled` y devuelve None, que es justo el caso de la mayoria de la audiencia
+    de este aviso.
+
+    `sync_user_tier` NO es opcional: sin el, un plan que vencio anoche seguiria
+    reportando tier='mensual' con un expires_at pasado, y el front calcularia dias
+    negativos.
+
+    `auto_renew` usa el MISMO criterio que scripts/notify_expiring.py (cualquier
+    Subscription 'authorized' del usuario, no solo la linkeada en
+    tier.subscription_id): a quien tiene debito automatico no hay que avisarle nada,
+    porque MP le cobra solo. Si los dos criterios divergieran, un usuario recibiria
+    el mail y no el cartel, o al reves."""
+    now = datetime.now(timezone.utc)
+    tier = sync_user_tier(db, user, now)
+    auto_renew = bool(
+        db.scalar(
+            select(
+                exists().where(
+                    Subscription.user_id == user.id,
+                    Subscription.mp_status == "authorized",
+                )
+            )
+        )
+    )
+    return MyTierOut(
+        tier=tier.tier if tier else "free",
+        expires_at=tier.expires_at if tier else None,
+        auto_renew=auto_renew,
+    )
 
 
 @router.put(
