@@ -388,8 +388,23 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
 - **Webhook 3 topics**: `payment` (legacy one-time), `subscription_preapproval` (cambio de
   estado de la suscripción: authorized/paused/cancelled), `subscription_authorized_payment`
   (cobro recurrente: approved/rejected).
+- **⚠️ El `data.id` de cada topic apunta a un recurso DISTINTO**, y confundirlos es un fallo
+  silencioso (ver "Renovación de suscripciones" abajo):
+
+  | Topic | Qué es `data.id` | Se lee con |
+  | --- | --- | --- |
+  | `payment` | id de pago | `sdk.payment().get()` → `/v1/payments/{id}` |
+  | `subscription_preapproval` | id de preapproval | `sdk.preapproval().get()` |
+  | `subscription_authorized_payment` | **id de FACTURA**, no de pago | `sdk.invoice().get()` → `/authorized_payments/{id}`; el pago real viene en `payment.id` |
+
+- **El mismo cobro llega por DOS topics.** Un cobro de suscripción se notifica por
+  `subscription_authorized_payment` **y** por `payment`, y en producción `payment` llegó
+  primero (medido: 1 segundo antes). Por eso `_handle_one_time_payment` rebota los pagos con
+  `operation_type == "recurring_payment"`: sin ese guard el handler legacy se queda con las
+  renovaciones y, peor, deja la fila en `payments`, con lo cual el guard de idempotencia por
+  `mp_payment_id` hace que el handler correcto descarte el cobro después.
 - **Tier dual-authority**: `Subscription.mp_status == "authorized"` (primario) +
-  `UserTier.expires_at > now` (fallback para legacy one-time y safety net por webhook que no
+  `UserTier.expires_at + TIER_GRACE > now` (fallback para legacy one-time y safety net por webhook que no
   llega). `user_is_unlimited()` chequea ambos: suscripción primero, expiry después.
 - **Coexistencia**: pagos legacy (`subscription_id = NULL`) siguen funcionando por `expires_at`.
 - **Mails de suscripción** (5 templates Jinja2): activated, cancelled, paused, charge_failed y
@@ -397,6 +412,38 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   vía el flag `is_chargeback`; se encola DESPUÉS del commit de la revocación).
 - **Mails de resultado (legacy)**: approved → activa tier; rejected/cancelled → registra el
   status + email.
+- **Renovación de suscripciones (arreglada 2026-09-28; estuvo ROTA desde el día uno).** El
+  débito automático de MP nunca renovó un tier en producción. Tres bugs apilados, todos
+  silenciosos:
+  1. **`_handle_subscription_payment` leía el recurso equivocado.** Llamaba
+     `sdk.payment().get(data_id)` con un id de **factura** → MP devolvía 404 → el handler cortaba
+     con `{"status": "ignored"}` **y HTTP 200**, así que en el historial de entregas de MP la
+     notificación figuraba como exitosa. Ahora: `sdk.invoice().get(data_id)` y después
+     `sdk.payment().get(invoice["payment"]["id"])`.
+  2. **El bloque de renovación solo tocaba `expires_at`.** Nunca reponía `tier.tier`, así que una
+     fila ya degradada a `free` por el downgrade perezoso quedaba en `free` con vencimiento
+     futuro — estado del que nada la sacaba. Ahora usa `renew_subscription_tier`, que reescribe
+     `tier`, `paid_at` y `subscription_id`. Tampoco se condiciona más a
+     `tier.subscription_id == sub.id`: el cobro de MP es la autoridad.
+  3. **El tier duraba 30/365 días contra un débito de mes CALENDARIO.** `frequency: 1,
+     frequency_type: "months"` cobra el mismo día de cada mes (28-31 días), así que todos los
+     meses de 31 días el tier vencía un día antes del cobro. Ahora `TIER_MONTHS` +
+     `_add_months`, y la renovación cuenta desde el `expires_at` vigente (`expiry_for(...,
+     since=...)`) para que el vencimiento quede pegado al aniversario y no se corra mes a mes.
+  - **`TIER_GRACE` (3 días)**: colchón entre el fin del período pago y el corte de acceso. Se
+    aplica en `tier_is_unlimited`, **no** en la columna — así la UI sigue mostrando hasta cuándo
+    se pagó y el colchón no se acumula al renovar. Cubre la latencia del webhook, **no** el ciclo
+    de reintentos de MP (4 intentos en ~10 días; la sub se cancela sola tras 3 fallos
+    consecutivos): si el cobro falla de verdad, el acceso se corta.
+  - **La suscripción se resuelve por `preapproval_id` de la factura**, no por
+    `external_reference` (que MP no siempre manda en el cobro recurrente). El
+    `external_reference` queda de fallback.
+  - **Caso real que lo destapó**: `car***@gmail.com`, alta 2026-08-28 17:47, tier vencido
+    2026-09-27 mientras MP debitaba el 2026-09-28. Una sola fila en `payments` en un mes, y con
+    `subscription_id = NULL` — la firma de que el cobro había entrado por el handler legacy.
+  - **Sin cobertura automatizada**: el backend no tiene tests. Este camino se verificó a mano
+    contra Postgres con las migraciones aplicadas y un SDK de MP stubbeado. Ver el TODO en la
+    raíz.
 - **Cancelar ≠ reembolsar (2026-08-09; endpoint alineado y auto-cancel en reembolso 2026-08-10).**
   Son dos efectos distintos sobre el tier:
   - **Cancelada o pausada** → corta los cobros **futuros**, pero **el tier pago se conserva hasta
