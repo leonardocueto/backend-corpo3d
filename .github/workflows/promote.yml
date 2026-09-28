@@ -1,0 +1,59 @@
+name: Promote dev to main
+
+# Pipeline MANUAL: se ejecuta desde la pestana Actions con "Run workflow"
+# (workflow_dispatch). Corre el CI sobre DEV (compila + importa la app, valida el
+# wiring sin ciclos) y, si pasa, mergea dev en main y lo pushea -> dispara el CD de
+# Render. dev = staging; main solo recibe codigo verde. El archivo vive en main
+# (rama default) para que aparezca el boton; el CI hace checkout de dev explicito.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile (sintaxis)
+        run: python -m compileall app alembic
+
+      # Importa toda la app: valida routers/modelos/schemas y que no haya ciclos
+      # de import. session_secret es obligatorio -> se pasa un dummy.
+      - name: Import app (wiring)
+        env:
+          SESSION_SECRET: ci-dummy-secret
+        run: python -c "import app.main"
+
+  promote:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge dev into main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin
+          git checkout -B main origin/main
+          git merge origin/dev -m "ci: promote dev to main"
+          git push origin main
