@@ -1,3 +1,4 @@
+import calendar
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
@@ -20,9 +21,28 @@ from app.schemas import MyTierOut, SetTierIn, UserTierOut
 router = APIRouter(prefix="/tiers", tags=["tiers"])
 
 PAID_TIERS = {"mensual", "anual"}
-# Duracion de cada tier pago (timedelta, sin dependencia extra; si se quiere
-# mes/año calendario exacto, usar python-dateutil relativedelta).
-TIER_DURATION = {"mensual": timedelta(days=30), "anual": timedelta(days=365)}
+# Duracion de cada tier pago, en MESES CALENDARIO. Antes eran timedelta(days=30)
+# y timedelta(days=365), y eso abria un agujero todos los meses: la preapproval de
+# MP se crea con `frequency: 1, frequency_type: "months"`, asi que MP debita el
+# MISMO DIA de cada mes (28 a 31 dias), mientras el tier vencia a los 30 fijos. Un
+# usuario que se suscribio un 28 de agosto se quedaba sin plan el 27 de septiembre
+# y MP le cobraba el 28: un dia de corte, dos en febrero, y el desfasaje se corria
+# mes a mes. Se resuelve contando meses calendario (ver `_add_months`).
+TIER_MONTHS = {"mensual": 1, "anual": 12}
+
+# Colchon entre el fin del periodo pago y el corte efectivo de acceso.
+#
+# Se aplica al CHEQUEO (`tier_is_unlimited`), NO a `expires_at`. Dos razones:
+# la fila sigue diciendo hasta cuando se pago —que es lo que muestra la UI y lo
+# que usa el aviso de vencimiento—, y al renovar contra `expires_at` el colchon no
+# se acumula periodo a periodo (si estuviera sumado en la columna, cada renovacion
+# arrastraria los dias de la anterior).
+#
+# Cubre la latencia normal entre el vencimiento y la llegada del webhook del cobro.
+# NO pretende cubrir el ciclo completo de reintentos de MP (hasta 4 intentos en una
+# ventana de ~10 dias, y la suscripcion se cancela sola tras 3 cobros fallidos
+# consecutivos): si el cobro falla de verdad, el acceso tiene que cortarse.
+TIER_GRACE = timedelta(days=3)
 
 # Limite por IP de GET /me. Lo llama el navbar una vez por carga de pagina, asi
 # que 30/min deja lugar de sobra para navegar y acota un loop accidental.
@@ -53,12 +73,15 @@ def plan_copy(plan: str | None) -> PlanCopy:
 
 def tier_is_unlimited(tier: "UserTier | None", now: datetime) -> bool:
     """True si el tier es pago y NO esta vencido. Funcion pura (sirve para el
-    batch del listado admin)."""
+    batch del listado admin).
+
+    El corte es `expires_at + TIER_GRACE`, no `expires_at` pelado: el colchon vive
+    aca y no en la columna (ver TIER_GRACE)."""
     return (
         tier is not None
         and tier.tier in PAID_TIERS
         and tier.expires_at is not None
-        and tier.expires_at > now
+        and tier.expires_at + TIER_GRACE > now
     )
 
 
@@ -95,8 +118,33 @@ def user_is_unlimited(db: DbSession, user: User, now: datetime) -> bool:
     return tier_is_unlimited(tier, now)
 
 
-def expiry_for(tier_name: str, now: datetime) -> datetime:
-    return now + TIER_DURATION[tier_name]
+def _add_months(dt: datetime, months: int) -> datetime:
+    """Suma meses CALENDARIO conservando el dia del mes. Si el dia no existe en el
+    mes destino se cae al ultimo dia (31-ene + 1 mes -> 28/29-feb), que es el mismo
+    criterio que usa MP para agendar el debito siguiente.
+
+    A mano y no con `dateutil.relativedelta` para no sumar una dependencia por seis
+    lineas; `calendar.monthrange` ya resuelve los años bisiestos."""
+    month_index = dt.month - 1 + months
+    year = dt.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def expiry_for(tier_name: str, now: datetime, since: datetime | None = None) -> datetime:
+    """Fin del periodo pago: un mes/año CALENDARIO (no 30/365 dias).
+
+    `since` es el arranque del periodo nuevo y solo lo usa la RENOVACION, que cuenta
+    desde el `expires_at` vigente para que el vencimiento quede pegado al aniversario
+    de cobro de MP en vez de corrersele un poco cada mes. Se toma `max(now, since)`:
+    si el tier estuvo vencido mucho tiempo (ej. se resuscribio meses despues) no se
+    regalan los periodos que no se cobraron.
+
+    Sin `since` cuenta desde `now`, que es lo que corresponde al alta manual de un
+    admin y al pago unico legacy."""
+    base = now if since is None or since < now else since
+    return _add_months(base, TIER_MONTHS[tier_name])
 
 
 def activate_subscription_tier(
@@ -112,6 +160,34 @@ def activate_subscription_tier(
     tier.tier = plan
     tier.paid_at = now
     tier.expires_at = expiry_for(plan, now)
+    tier.subscription_id = subscription_id
+    tier.expiry_warning_sent_at = None
+    return tier
+
+
+def renew_subscription_tier(
+    db: DbSession,
+    user_id: uuid.UUID,
+    plan: str,
+    subscription_id: uuid.UUID,
+    now: datetime,
+) -> UserTier:
+    """Renueva el tier tras un cobro recurrente APROBADO.
+
+    Difiere de `activate_subscription_tier` en una cosa sola pero importante: el
+    periodo nuevo arranca en el `expires_at` vigente, no en `now`, asi el
+    vencimiento queda pegado al aniversario de cobro de MP (ver `expiry_for`).
+
+    Reescribe `tier` y `subscription_id` a proposito, no solo `expires_at`. Antes el
+    webhook de renovacion tocaba unicamente `expires_at`, y eso lo hacia inutil
+    justo en el caso que importa: si el downgrade perezoso
+    (`sync_user_tier` -> `downgrade_if_expired`) ya habia pasado la fila a 'free',
+    la renovacion la dejaba en 'free' con un `expires_at` futuro — un estado que
+    `tier_is_unlimited` sigue leyendo como vencido, y del que nada la sacaba."""
+    tier = _get_or_create_locked(db, user_id)
+    tier.tier = plan
+    tier.paid_at = now
+    tier.expires_at = expiry_for(plan, now, since=tier.expires_at)
     tier.subscription_id = subscription_id
     tier.expiry_warning_sent_at = None
     return tier
@@ -141,9 +217,10 @@ def activate_paid_tier(
     webhook activa el tier y registra el Payment en UNA sola transaccion). Lo usan
     el endpoint admin (set_user_tier) y el webhook de Mercado Pago.
 
-    Renovacion: cuenta desde `now`. Si se quisiera extender desde el vencimiento
-    vigente (sin "perder" dias), seria expires_at = expiry_for(plan, max(now,
-    tier.expires_at or now)) -- anotado, no critico para el pago unico."""
+    Cuenta desde `now`, y eso es deliberado: aca caen el alta manual de un admin
+    ("dale un mes desde hoy") y el pago unico legacy, donde no hay un periodo previo
+    al que engancharse. La renovacion de una suscripcion NO usa esta funcion, usa
+    `renew_subscription_tier`, que extiende desde el `expires_at` vigente."""
     tier = _get_or_create_locked(db, user_id)
     tier.tier = plan
     tier.paid_at = now

@@ -40,8 +40,8 @@ from app.routers.tiers import (
     activate_paid_tier,
     activate_subscription_tier,
     deactivate_subscription_tier,
-    expiry_for,
     plan_copy,
+    renew_subscription_tier,
 )
 from app.schemas import (
     CancelSubscriptionOut,
@@ -604,10 +604,45 @@ def _apply_refund(
 def _handle_subscription_payment(
     data_id: str, db: DbSession, background: BackgroundTasks
 ) -> dict:
-    """Procesa un cobro recurrente de una suscripcion."""
+    """Procesa un cobro recurrente de una suscripcion.
+
+    **`data.id` de este topic es el id de la FACTURA (authorized payment), NO de un
+    pago.** Se lee de `/authorized_payments/{id}` (`sdk.invoice()`), y el pago real
+    viene anidado en `payment.id`; recien ese id sirve contra `/v1/payments`.
+
+    Esto estuvo roto en produccion desde el dia uno: el handler le pegaba a
+    `sdk.payment().get(data_id)` con el id de factura, MP devolvia 404, el `if` de
+    abajo cortaba con `{"status": "ignored"}` y el webhook respondia **200**. O sea
+    que en el historial de entregas de MP figuraba como exitoso mientras el cobro se
+    descartaba en silencio: sin fila en `payments`, sin extender `expires_at`, sin
+    mail. El tier vencia a pesar de que la tarjeta se seguia debitando.
+
+    Se sostuvo de casualidad porque MP notifica el mismo cobro tambien por el topic
+    `payment`, y `_handle_one_time_payment` lo tomaba — con el plan mal linkeado
+    (`subscription_id = NULL`) y el copy de mail de pago unico. Ese handler ahora
+    rebota los cobros recurrentes, asi que este es el unico camino."""
     sdk = _get_sdk()
-    result = sdk.payment().get(data_id)
+    result = sdk.invoice().get(data_id)
     if result.get("status") != 200:
+        logger.warning(
+            "MP invoice %s no se pudo leer (status %s): %s",
+            data_id, result.get("status"), result.get("response"),
+        )
+        return {"status": "ignored"}
+    invoice = result["response"]
+
+    payment_id = (invoice.get("payment") or {}).get("id")
+    if not payment_id:
+        # Factura agendada (`scheduled`) a la que todavia no se le intento el cobro.
+        # MP re-notifica cuando la procesa; no hay nada que registrar aun.
+        return {"status": "ok"}
+
+    result = sdk.payment().get(str(payment_id))
+    if result.get("status") != 200:
+        logger.warning(
+            "MP payment %s de la factura %s no se pudo leer (status %s)",
+            payment_id, data_id, result.get("status"),
+        )
         return {"status": "ignored"}
     payment_data = result["response"]
     mp_status = payment_data.get("status")
@@ -623,20 +658,23 @@ def _handle_subscription_payment(
     if db.scalar(select(Payment).where(Payment.mp_payment_id == mp_payment_id)):
         return {"status": "ok"}
 
-    user_id, plan = _parse_external_ref(payment_data.get("external_reference"))
+    # La suscripcion se resuelve por `preapproval_id` de la factura, que es el
+    # vinculo DIRECTO que manda MP. El `external_reference` queda de fallback (y es
+    # el unico camino para saber el plan si la sub no esta en la base).
+    sub = db.scalar(
+        select(Subscription).where(
+            Subscription.mp_preapproval_id == str(invoice.get("preapproval_id") or "")
+        )
+    )
+    if sub is not None:
+        user_id, plan = sub.user_id, sub.plan
+    else:
+        user_id, plan = _parse_external_ref(payment_data.get("external_reference"))
     if user_id is None or plan is None:
         return {"status": "ignored"}
     user = db.get(User, user_id)
     if user is None:
         return {"status": "ignored"}
-
-    sub = db.scalar(
-        select(Subscription).where(
-            Subscription.user_id == user_id,
-            Subscription.mp_status.in_(("authorized", "pending")),
-            Subscription.plan == plan,
-        ).order_by(Subscription.created_at.desc())
-    )
 
     amount = int(payment_data.get("transaction_amount") or 0)
     to_email = user.email
@@ -654,15 +692,29 @@ def _handle_subscription_payment(
     )
 
     expires_str = ""
-    if mp_status == "approved" and sub:
+    if mp_status == "approved":
+        # `renew_subscription_tier` y no un update de `expires_at` a mano: reescribe
+        # tambien `tier` y `subscription_id`, sin lo cual una fila ya degradada a
+        # 'free' por el downgrade perezoso se quedaba en 'free' con vencimiento
+        # futuro. Y NO se condiciona a `tier.subscription_id == sub.id`: el cobro de
+        # MP es la autoridad, y si el link se habia perdido (o nunca se seteo, como
+        # en los cobros que entraron por el handler legacy) esa condicion descartaba
+        # justo la renovacion que habia que aplicar.
+        #
+        # Sin `sub` (cobro cuya preapproval no esta en la base) se activa igual por
+        # `activate_paid_tier`, sin link. Cobrarle a alguien y no darle el tier es
+        # peor que un tier sin trazabilidad a la suscripcion.
         now = datetime.now(timezone.utc)
-        tier = db.scalar(
-            select(UserTier).where(UserTier.user_id == user_id).with_for_update()
-        )
-        if tier and tier.subscription_id == sub.id:
-            tier.expires_at = expiry_for(plan, now)
-            tier.expiry_warning_sent_at = None
-            expires_str = format_date(tier.expires_at)
+        if sub is not None:
+            tier = renew_subscription_tier(db, user_id, plan, sub.id, now)
+        else:
+            logger.warning(
+                "Cobro recurrente %s sin Subscription local (preapproval %s): "
+                "tier activado sin link",
+                mp_payment_id, invoice.get("preapproval_id"),
+            )
+            tier = activate_paid_tier(db, user_id, plan, now)
+        expires_str = format_date(tier.expires_at)
 
     try:
         db.commit()
@@ -693,7 +745,21 @@ def _handle_subscription_payment(
 def _handle_one_time_payment(
     data_id: str, db: DbSession, background: BackgroundTasks
 ) -> dict:
-    """Procesa un pago unico de Checkout Pro (legacy)."""
+    """Procesa un pago unico de Checkout Pro (legacy).
+
+    Rebota los cobros de suscripcion (`operation_type == "recurring_payment"`): MP
+    notifica el MISMO cobro por dos topics, `payment` y
+    `subscription_authorized_payment`, y sin este guard gana el que llega primero.
+    En produccion llegaba primero `payment` (medido: 1 segundo antes), asi que este
+    handler se quedaba con los cobros de suscripcion y los registraba como pago
+    unico: `subscription_id` en NULL, mail con el copy equivocado (sin
+    `is_recurring`) y `activate_paid_tier` en vez de la renovacion, que cuenta desde
+    `now` y por lo tanto corre el vencimiento un poco cada mes. Peor: dejaba la fila
+    en `payments`, y entonces el guard de idempotencia del handler correcto lo
+    descartaba despues por `mp_payment_id` ya existente.
+
+    El reembolso NO se filtra aca: `_apply_refund` corre antes del guard porque un
+    reembolso hay que aplicarlo venga por el topic que venga."""
     sdk = _get_sdk()
     result = sdk.payment().get(data_id)
     if result.get("status") != 200:
@@ -704,6 +770,9 @@ def _handle_one_time_payment(
     refunded = _apply_refund(payment_data, db, background)
     if refunded is not None:
         return refunded
+
+    if payment_data.get("operation_type") == "recurring_payment":
+        return {"status": "ok"}
 
     if mp_status not in ("approved", "rejected", "cancelled"):
         return {"status": "ignored"}
