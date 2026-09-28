@@ -44,6 +44,21 @@ TIER_MONTHS = {"mensual": 1, "anual": 12}
 # consecutivos): si el cobro falla de verdad, el acceso tiene que cortarse.
 TIER_GRACE = timedelta(days=3)
 
+# Hasta cuando se sigue confiando en una suscripcion `authorized` de MP despues de
+# que vencio el periodo pago.
+#
+# `user_is_unlimited` da acceso con solo ver la suscripcion `authorized`, sin mirar
+# si el ultimo cobro entro — y MP la deja `authorized` mucho despues de que los
+# cobros empiezan a fallar: hasta 4 reintentos en ~10 dias por ciclo, y recien tras
+# 3 ciclos consecutivos fallidos la cancela sola. Sin este tope, alguien podia dejar
+# de pagar y conservar las exportaciones ilimitadas unos 3 meses.
+#
+# 15 dias cubre con margen la ventana de reintentos, asi que a un cobro que se
+# recupera al 3er intento no se le corta nada; solo pierde el acceso quien
+# efectivamente dejo de pagar. Es mas largo que TIER_GRACE a proposito: aquel cubre
+# la latencia de un webhook, este cubre el ciclo de cobranza de MP.
+SUBSCRIPTION_DUNNING = timedelta(days=15)
+
 # Limite por IP de GET /me. Lo llama el navbar una vez por carga de pagina, asi
 # que 30/min deja lugar de sobra para navegar y acota un loop accidental.
 ME_LIMIT = "30/minute"
@@ -107,15 +122,31 @@ def sync_user_tier(db: DbSession, user: User, now: datetime) -> "UserTier | None
 def user_is_unlimited(db: DbSession, user: User, now: datetime) -> bool:
     """True si el usuario no tiene limite de exportaciones: admin, suscripcion
     activa (primario), o tier pago vigente por expires_at (fallback legacy +
-    safety net). Fuente unica de verdad del concepto 'ilimitado'."""
+    safety net). Fuente unica de verdad del concepto 'ilimitado'.
+
+    La rama de la suscripcion **caduca a los `SUBSCRIPTION_DUNNING` dias** del
+    vencimiento del periodo pago. Existe para que un webhook que no llega no le corte
+    el acceso a alguien que si pago, pero sin tope protegia tambien al que dejo de
+    pagar: MP no cancela la suscripcion hasta 3 ciclos fallidos, o sea unos 3 meses
+    de acceso gratis."""
     if user.is_admin:
         return True
     tier = sync_user_tier(db, user, now)
-    if tier and tier.subscription_id:
+    if tier and tier.subscription_id and _within_dunning(tier, now):
         sub = db.get(Subscription, tier.subscription_id)
         if sub and sub.mp_status == "authorized":
             return True
     return tier_is_unlimited(tier, now)
+
+
+def _within_dunning(tier: UserTier, now: datetime) -> bool:
+    """True si el periodo pago del tier no venció hace más de `SUBSCRIPTION_DUNNING`.
+
+    Sin `expires_at` devuelve True: no hay contra qué medir el atraso, y ante la duda
+    no se le corta el acceso a alguien con una suscripción activa."""
+    if tier.expires_at is None:
+        return True
+    return tier.expires_at + SUBSCRIPTION_DUNNING > now
 
 
 def _add_months(dt: datetime, months: int) -> datetime:
@@ -132,19 +163,23 @@ def _add_months(dt: datetime, months: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
-def expiry_for(tier_name: str, now: datetime, since: datetime | None = None) -> datetime:
-    """Fin del periodo pago: un mes/año CALENDARIO (no 30/365 dias).
+def expiry_for(tier_name: str, now: datetime) -> datetime:
+    """Fin del periodo pago: un mes/año CALENDARIO (no 30/365 dias), contado SIEMPRE
+    desde `now`.
 
-    `since` es el arranque del periodo nuevo y solo lo usa la RENOVACION, que cuenta
-    desde el `expires_at` vigente para que el vencimiento quede pegado al aniversario
-    de cobro de MP en vez de corrersele un poco cada mes. Se toma `max(now, since)`:
-    si el tier estuvo vencido mucho tiempo (ej. se resuscribio meses despues) no se
-    regalan los periodos que no se cobraron.
+    Contar desde `now` y no desde el `expires_at` vigente es deliberado, y costó un
+    bug. Extender desde el vencimiento parece mejor —"no se pierden los días que
+    sobraban"— pero es innecesario: MP cobra EL DÍA del aniversario, así que contar
+    desde el cobro ya deja el vencimiento clavado en esa fecha. La deriva que se
+    quería evitar venía de `timedelta(days=30)`, que no es un mes; con meses
+    calendario no existe.
 
-    Sin `since` cuenta desde `now`, que es lo que corresponde al alta manual de un
-    admin y al pago unico legacy."""
-    base = now if since is None or since < now else since
-    return _add_months(base, TIER_MONTHS[tier_name])
+    Y extender ACUMULA. En un alta nueva, MP manda el evento `authorized` de la
+    preapproval **y** la factura del primer cobro: el primero ponía un mes y el
+    segundo estiraba sobre ese, con lo cual un suscriptor nuevo se llevaba DOS meses
+    por un solo pago. Contando desde `now` los dos eventos calculan el mismo valor y
+    la operación queda idempotente."""
+    return _add_months(now, TIER_MONTHS[tier_name])
 
 
 def activate_subscription_tier(
@@ -154,40 +189,23 @@ def activate_subscription_tier(
     subscription_id: uuid.UUID,
     now: datetime,
 ) -> UserTier:
-    """Activa un tier desde una suscripcion. Como activate_paid_tier pero ademas
-    linkea la suscripcion activa."""
+    """Activa **o renueva** un tier desde una suscripcion. Como activate_paid_tier
+    pero ademas linkea la suscripcion.
+
+    Alta y renovacion son la MISMA operacion, y conviene que siga siendo asi: como
+    `expiry_for` cuenta desde `now`, aplicarla dos veces por el mismo cobro da el
+    mismo resultado. Eso es lo que vuelve inofensivo que MP notifique un alta por dos
+    eventos (`authorized` de la preapproval + la factura del primer cobro).
+
+    Reescribe `tier` y `subscription_id` enteros, no solo `expires_at`. En la
+    renovacion eso no es cosmetico: si el downgrade perezoso
+    (`sync_user_tier` -> `downgrade_if_expired`) ya paso la fila a 'free', tocar solo
+    `expires_at` la dejaria en 'free' con vencimiento futuro — un estado que
+    `tier_is_unlimited` lee como vencido y del que nada la saca."""
     tier = _get_or_create_locked(db, user_id)
     tier.tier = plan
     tier.paid_at = now
     tier.expires_at = expiry_for(plan, now)
-    tier.subscription_id = subscription_id
-    tier.expiry_warning_sent_at = None
-    return tier
-
-
-def renew_subscription_tier(
-    db: DbSession,
-    user_id: uuid.UUID,
-    plan: str,
-    subscription_id: uuid.UUID,
-    now: datetime,
-) -> UserTier:
-    """Renueva el tier tras un cobro recurrente APROBADO.
-
-    Difiere de `activate_subscription_tier` en una cosa sola pero importante: el
-    periodo nuevo arranca en el `expires_at` vigente, no en `now`, asi el
-    vencimiento queda pegado al aniversario de cobro de MP (ver `expiry_for`).
-
-    Reescribe `tier` y `subscription_id` a proposito, no solo `expires_at`. Antes el
-    webhook de renovacion tocaba unicamente `expires_at`, y eso lo hacia inutil
-    justo en el caso que importa: si el downgrade perezoso
-    (`sync_user_tier` -> `downgrade_if_expired`) ya habia pasado la fila a 'free',
-    la renovacion la dejaba en 'free' con un `expires_at` futuro — un estado que
-    `tier_is_unlimited` sigue leyendo como vencido, y del que nada la sacaba."""
-    tier = _get_or_create_locked(db, user_id)
-    tier.tier = plan
-    tier.paid_at = now
-    tier.expires_at = expiry_for(plan, now, since=tier.expires_at)
     tier.subscription_id = subscription_id
     tier.expiry_warning_sent_at = None
     return tier
