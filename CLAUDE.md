@@ -399,13 +399,17 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
 
 - **El mismo cobro llega por DOS topics.** Un cobro de suscripción se notifica por
   `subscription_authorized_payment` **y** por `payment`, y en producción `payment` llegó
-  primero (medido: 1 segundo antes). Por eso `_handle_one_time_payment` rebota los pagos con
-  `operation_type == "recurring_payment"`: sin ese guard el handler legacy se queda con las
-  renovaciones y, peor, deja la fila en `payments`, con lo cual el guard de idempotencia por
-  `mp_payment_id` hace que el handler correcto descarte el cobro después.
-- **Tier dual-authority**: `Subscription.mp_status == "authorized"` (primario) +
-  `UserTier.expires_at + TIER_GRACE > now` (fallback para legacy one-time y safety net por webhook que no
-  llega). `user_is_unlimited()` chequea ambos: suscripción primero, expiry después.
+  primero (medido: 1 segundo antes). Por eso **los dos topics convergen en
+  `_process_subscription_charge`**: el que llega primero hace el trabajo completo (registra el
+  pago, linkea la suscripción, activa el tier, manda el mail de recurrente) y el segundo se va
+  por el guard de idempotencia de `mp_payment_id`. `_handle_one_time_payment` detecta los
+  cobros de suscripción por `operation_type == "recurring_payment"` y **delega**; no los
+  descarta, porque un cobro que MP notifique solo por ese topic no quedaría registrado en
+  ningún lado.
+- **Tier dual-authority**: `Subscription.mp_status == "authorized"` **dentro de la ventana de
+  `SUBSCRIPTION_DUNNING`** (primario) + `UserTier.expires_at + TIER_GRACE > now` (fallback para
+  legacy one-time y safety net por webhook que no llega). `user_is_unlimited()` chequea ambos:
+  suscripción primero, expiry después.
 - **Coexistencia**: pagos legacy (`subscription_id = NULL`) siguen funcionando por `expires_at`.
 - **Mails de suscripción** (5 templates Jinja2): activated, cancelled, paused, charge_failed y
   **refund_processed** (`send_refund_email`, una sola plantilla que cubre reembolso y contracargo
@@ -432,9 +436,24 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
      since=...)`) para que el vencimiento quede pegado al aniversario y no se corra mes a mes.
   - **`TIER_GRACE` (3 días)**: colchón entre el fin del período pago y el corte de acceso. Se
     aplica en `tier_is_unlimited`, **no** en la columna — así la UI sigue mostrando hasta cuándo
-    se pagó y el colchón no se acumula al renovar. Cubre la latencia del webhook, **no** el ciclo
-    de reintentos de MP (4 intentos en ~10 días; la sub se cancela sola tras 3 fallos
-    consecutivos): si el cobro falla de verdad, el acceso se corta.
+    se pagó. Cubre la latencia del webhook.
+  - **`SUBSCRIPTION_DUNNING` (15 días)**: hasta cuándo `user_is_unlimited` sigue confiando en
+    una suscripción `authorized` de MP después de que venció el período pago. Sin este tope, un
+    cobro que falla daba ~3 meses de acceso gratis (MP no cancela hasta 3 ciclos fallidos). 15
+    cubre con margen la ventana de reintentos de MP (4 intentos en ~10 días), así que un cobro
+    que se recupera al 3er intento no corta nada.
+  - **`expiry_for` cuenta SIEMPRE desde `now`, nunca desde el `expires_at` vigente.** Extender
+    desde el vencimiento parece mejor y es un **bug**: en un alta nueva MP manda el evento
+    `authorized` de la preapproval **y** la factura del primer cobro, así que el segundo estira
+    sobre lo que puso el primero y el suscriptor se lleva **dos meses por un solo pago** (pasó:
+    introducido el 2026-09-28 y corregido el mismo día). Contando desde `now` los dos eventos
+    calculan el mismo valor y la operación queda idempotente. Y no hay deriva que corregir: MP
+    cobra **el día** del aniversario, así que contar desde el cobro ya deja el vencimiento
+    clavado en esa fecha. La deriva que se quería evitar venía de `timedelta(days=30)`, que no
+    es un mes.
+  - **Alta y renovación son la MISMA operación** (`activate_subscription_tier`). No hay una
+    función de renovación aparte, a propósito: con `expiry_for` contando desde `now`, aplicarla
+    dos veces por el mismo cobro da el mismo resultado.
   - **La suscripción se resuelve por `preapproval_id` de la factura**, no por
     `external_reference` (que MP no siempre manda en el cobro recurrente). El
     `external_reference` queda de fallback.
