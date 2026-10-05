@@ -1,8 +1,8 @@
 """Limpieza de filas vencidas de tablas efimeras. Uso: python -m scripts.cleanup_expired
 
 Pensado para correr UNA VEZ POR DIA (Render Cron Job o manual). Borra filas con
-`expires_at < now()` de: sessions (tambien revocadas), password_reset_tokens
-y pending_registrations. No toca users, payments ni tiers.
+`expires_at < now()` de: sessions (tambien revocadas), password_reset_tokens,
+reactivation_tokens y pending_registrations. No toca users, payments ni tiers.
 login_otps ya no se limpia aca: los OTPs viven en Redis con TTL nativo.
 
 `--dry-run`: muestra cuantas filas se borrarian SIN borrar."""
@@ -12,11 +12,17 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, func, select
 
 from app.database import SessionLocal
-from app.models import PasswordResetToken, PendingRegistration, Session
+from app.models import (
+    PasswordResetToken,
+    PendingRegistration,
+    ReactivationToken,
+    Session,
+)
 
 TABLES = [
     ("sessions", Session, Session.expires_at),
     ("password_reset_tokens", PasswordResetToken, PasswordResetToken.expires_at),
+    ("reactivation_tokens", ReactivationToken, ReactivationToken.expires_at),
     ("pending_registrations", PendingRegistration, PendingRegistration.expires_at),
 ]
 

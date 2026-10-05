@@ -131,6 +131,35 @@ class PasswordResetToken(Base):
     user: Mapped["User"] = relationship()
 
 
+class ReactivationToken(Base):
+    """Token de un solo uso para revivir una cuenta dada de baja por su dueno.
+
+    Mismo principio que PasswordResetToken: en DB vive SOLO el HMAC del token; el
+    valor plano viaja por email. Single-use (`used_at`) y de vida corta
+    (`expires_at`, ver `reactivation_token_minutes`).
+
+    Es una TABLA APARTE y no una columna `purpose` en `password_reset_tokens` a
+    proposito: asi el tipo de la tabla ES el discriminador y un token de reset no
+    puede revivir una cuenta (ni al reves), sin depender de que ningun `select`
+    futuro se acuerde de filtrar por el proposito.
+    """
+
+    __tablename__ = "reactivation_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship()
+
+
 class PendingRegistration(Base):
     """Alta self-serve a la espera de confirmar el email (double opt-in). Mismo
     principio que PasswordResetToken: en DB vive SOLO el HMAC del token; el valor

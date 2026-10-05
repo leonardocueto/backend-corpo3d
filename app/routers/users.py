@@ -4,6 +4,7 @@ Todos los endpoints requieren admin (dependency a nivel router). La salida usa
 `UserOut`, que NO expone `password_hash` ni datos sensibles.
 """
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Literal
@@ -14,7 +15,8 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.database import get_db
 from app.deps import require_admin
-from app.models import ExportWindow, User, UserTier
+from app import storage
+from app.models import ExportWindow, User, UserDesign, UserTier
 from app.routers.exports import remaining_for
 from app.routers.tiers import PAID_TIERS, downgrade_if_expired, expiry_for, tier_is_unlimited
 from app.schemas import (
@@ -32,6 +34,8 @@ router = APIRouter(
     tags=["users"],
     dependencies=[Depends(require_admin)],  # todo el router es admin-only
 )
+
+logger = logging.getLogger("users")
 
 
 @router.get("", response_model=UsersPage)
@@ -268,5 +272,26 @@ def delete_user(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    # El CASCADE borra las filas de `user_designs` pero NO los objetos en R2: hay que
+    # juntarlos ANTES del delete y borrarlos a mano, igual que hace la baja
+    # self-service. Sin esto el bucket se queda con los diseños de alguien que ya no
+    # existe, y "se eliminan de forma permanente" seria cierto por un camino y falso
+    # por el otro.
+    design_keys = [
+        k
+        for row in db.scalars(select(UserDesign).where(UserDesign.user_id == user_id))
+        for k in (row.json_key, row.thumb_key)
+    ]
     db.delete(user)
     db.commit()
+    # Best-effort y despues del commit, mismo criterio que la baja: el borrado del
+    # usuario no puede fallar porque se caiga R2.
+    if design_keys:
+        try:
+            storage.delete_keys(*design_keys)
+        except Exception:
+            logger.error(
+                "Borrado del usuario %s: no se pudieron borrar %d objetos en R2. "
+                "BORRARLOS A MANO: %s",
+                user_id, len(design_keys), design_keys,
+            )

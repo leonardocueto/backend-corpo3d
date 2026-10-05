@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"  # base del link del email
     reset_token_minutes: int = 10                # vida del token de reset
     signup_token_minutes: int = 60               # vida del link de verificacion de alta (double opt-in)
+    # Vida del link que revive una cuenta dada de baja. 60 y no los 10 del reset: el
+    # analogo es el link que REVIVE una cuenta (como el de alta), no el que rota una
+    # credencial de una cuenta viva. Ademas llega tambien por el desvio de
+    # /forgot-password, donde la persona pidio otra cosa y va a leer antes de clickear.
+    reactivation_token_minutes: int = 60
     tier_expiry_warning_days: int = 10           # aviso "vence pronto" N dias antes (job diario)
     resend_api_key: str | None = None            # si falta, en dev se loguea el link
     email_from: str = "CorpoLab 3D <no-reply@corpolab3d.com>"  # dominio verificado en Resend
@@ -38,7 +43,11 @@ class Settings(BaseSettings):
     # uno solo tiene que pedir la re-aceptacion de ese, no de los dos.
     # 2026-08-14: la baja de cuenta paso a ser self-service (§14.1 decia que habia
     # que escribir a contacto@).
-    terms_version: str = "2026-08-14"
+    # 2026-10-05: §14.1 otra vez. La baja ahora ELIMINA los diseños guardados en la
+    # nube (antes solo se perdia el acceso) y la cuenta PUEDE volver a activarse por
+    # mail. Cambia lo que pasa con el contenido del usuario, asi que la re-aceptacion
+    # no es opcional.
+    terms_version: str = "2026-10-05"
     # 2026-08-16: se activaron cookies de medicion (Google Analytics via GTM +
     # Microsoft Clarity), declaradas en el §5.3 y aceptadas al usar el servicio /
     # registrarse. NO hay banner de cookies (Argentina no tiene una norma tipo

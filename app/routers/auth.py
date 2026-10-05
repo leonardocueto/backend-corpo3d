@@ -16,7 +16,9 @@ from sqlalchemy.orm import Session as DbSession
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, require_admin, require_captcha
+from app import storage
 from app.email import (
+    send_account_reactivation_email,
     send_login_otp_email,
     send_password_reset_email,
     send_signup_verification_email,
@@ -26,9 +28,11 @@ from app.google_oauth import GoogleAuthError, verify_google_id_token
 from app.models import (
     PasswordResetToken,
     PendingRegistration,
+    ReactivationToken,
     Session,
     Subscription,
     User,
+    UserDesign,
 )
 from app.otp import RedisUnavailableError, has_active_otp
 from app.otp import store_otp as redis_store_otp
@@ -43,7 +47,9 @@ from app.schemas import (
     GoogleAuthIn,
     LoginIn,
     LoginResponse,
+    ReactivateIn,
     RegisterIn,
+    RequestReactivationIn,
     ResendOtpIn,
     ResetPasswordIn,
     AcceptLegalIn,
@@ -114,6 +120,45 @@ def _otp_required(user: User) -> bool:
     return settings.otp_enabled or user.is_admin
 
 
+def _is_self_deactivated(user: User) -> bool:
+    """`deactivated_at` es el DISCRIMINADOR de los dos motivos de inactividad:
+
+      - CON fecha  -> la baja la pidio el propio usuario. Puede revivirla el mismo.
+      - sin fecha  -> la apago un admin. NO se auto-reactiva: seria deshacer con un
+        clic la unica herramienta de moderacion que hay.
+
+    La condicion la necesitan los dos emisores del link y el consumidor, y
+    escribirla tres veces es como se desincroniza.
+    """
+    return not user.is_active and user.deactivated_at is not None
+
+
+def _issue_reactivation_link(db: DbSession, user: User, background: BackgroundTasks) -> None:
+    """Emite el link que revive la cuenta y lo manda por mail.
+
+    El caller YA verifico que la cuenta es una baja self-service. Un solo link vivo
+    a la vez (se invalidan los previos sin usar), mismo patron que el reset y el
+    alta.
+    """
+    now = datetime.now(timezone.utc)
+    db.execute(
+        update(ReactivationToken)
+        .where(ReactivationToken.user_id == user.id, ReactivationToken.used_at.is_(None))
+        .values(used_at=now)
+    )
+    token = generate_token()
+    db.add(
+        ReactivationToken(
+            user_id=user.id,
+            token_hash=hash_token(token),
+            expires_at=now + timedelta(minutes=settings.reactivation_token_minutes),
+        )
+    )
+    db.commit()
+    link = f"{settings.frontend_url.rstrip('/')}/reactivar?token={token}"
+    background.add_task(send_account_reactivation_email, user.email, link)
+
+
 @router.post(
     "/login",
     response_model=LoginResponse,
@@ -139,7 +184,14 @@ def login(
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
     if not user.is_active:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+        # Se distinguen los dos motivos de inactividad, y el discriminador es
+        # `deactivated_at` (ver `_is_self_deactivated`): con fecha la pidio el propio
+        # usuario y el front le ofrece reactivar; sin fecha la apago un admin y no hay
+        # nada que la persona pueda hacer sola.
+        # Esto NO filtra que cuentas existen: para llegar aca hay que haber pasado la
+        # verificacion de password de arriba.
+        detail = "account_deactivated" if user.deactivated_at else "Usuario inactivo"
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
 
     if not _otp_required(user):
         _start_session(db, user, response)
@@ -539,7 +591,39 @@ def deactivate_account(
     seguiria cobrando a alguien que ya se fue. La cancelacion es best-effort: si MP
     no responde, la baja se persiste igual (revertirla por un fallo de un tercero
     seria peor) y queda el log para resolverlo a mano.
+
+    LO QUE SI SE BORRA DE VERDAD: los diseños guardados en la nube (filas de
+    `user_designs` Y los objetos en R2). El cascade de la DB no toca el bucket, asi
+    que hay que borrarlo explicitamente. El historial comercial (`payments`,
+    `export_logs`) queda intacto: son tablas aparte y su FK es ON DELETE SET NULL.
+    O sea que si la persona vuelve, recupera la cuenta y su historial, pero empieza
+    sin diseños. Esta declarado en Terminos §14.1.
     """
+    # Primero de todo, antes de cualquier efecto: un admin no puede darse de baja a si
+    # mismo. Los guards del panel (`PATCH`/`DELETE /users/{id}`) son del tipo "no te lo
+    # hagas a vos mismo" y por eso el panel nunca llega a cero admins; este endpoint no
+    # pasaba por ninguno, asi que el unico admin podia desactivarse y quedarse sin poder
+    # entrar ni como usuario comun (se recupera con scripts/create_admin.py contra la
+    # DB, pero es una tarde perdida).
+    #
+    # La regla es "los admins no se dan de baja solos", NO "solo se bloquea al ultimo":
+    # modela mejor un offboarding real —otro admin revoca el acceso y queda registro de
+    # quien lo hizo— y separa dos actos distintos, dejar de ser admin y dejar de ser
+    # usuario. Ademas evita la carrera del conteo (dos ultimos admins dandose de baja a
+    # la vez pasarian los dos el check).
+    #
+    # Va ANTES del lookup de la suscripcion a proposito: mas abajo se cancela la
+    # preapproval en MP, y cortar despues dejaria al admin con la suscripcion cancelada
+    # en un tercero —efecto irreversible— y un 403 encima.
+    #
+    # Consecuencia buscada: un admin nunca tiene `deactivated_at` con fecha, asi que
+    # nunca entra al camino de auto-reactivacion.
+    if user.is_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="Una cuenta de administrador no puede darse de baja",
+        )
+
     sub = db.scalar(
         select(Subscription).where(
             Subscription.user_id == user.id,
@@ -553,6 +637,13 @@ def deactivate_account(
             user.id, sub.mp_preapproval_id,
         )
 
+    # Diseños guardados: se juntan las claves ANTES de borrar las filas, porque
+    # despues del commit ya no estan para consultarlas.
+    designs = list(db.scalars(select(UserDesign).where(UserDesign.user_id == user.id)))
+    design_keys = [k for row in designs for k in (row.json_key, row.thumb_key)]
+    for row in designs:
+        db.delete(row)
+
     now = datetime.now(timezone.utc)
     user.is_active = False
     user.deactivated_at = now
@@ -565,6 +656,22 @@ def deactivate_account(
         .values(revoked_at=now)
     )
     db.commit()
+
+    # R2 DESPUES del commit y best-effort, igual que la cancelacion en MP: la baja es
+    # un acto con plazo legal y no puede fallar porque se caiga un tercero.
+    # `storage.delete_keys` no atrapa nada, asi que sin este try un error de R2 seria
+    # un 500 con la baja YA persistida: lo peor de los dos mundos. Las filas, en
+    # cambio, se borran si o si — si quedaran, al reactivar la cuenta aparecerian
+    # tarjetas en /designs con miniaturas rotas.
+    if design_keys:
+        try:
+            storage.delete_keys(*design_keys)
+        except Exception:
+            logger.error(
+                "Baja de cuenta %s: no se pudieron borrar %d objetos en R2. "
+                "BORRARLOS A MANO: %s",
+                user.id, len(design_keys), design_keys,
+            )
 
     response.delete_cookie(
         key=settings.cookie_name,
@@ -591,7 +698,14 @@ def forgot_password(
     """Pide un link de reset. Responde SIEMPRE 204, exista o no el email, para no
     filtrar que cuentas estan registradas (anti-enumeracion)."""
     user = db.scalar(select(User).where(User.email == payload.email))
-    if user is not None and user.is_active:
+    if user is not None and _is_self_deactivated(user):
+        # Se dio de baja Y olvido la clave. Se le manda el mail de REACTIVACION, no el
+        # de reset: un link de reset no la haria volver (no reactiva) y encima
+        # /reset-password lo rechaza por `is_active`, asi que era un link que siempre
+        # terminaba en 400. El de reactivacion hace las dos cosas que necesita —cuenta
+        # viva + clave nueva— en un clic.
+        _issue_reactivation_link(db, user, background)
+    elif user is not None and user.is_active:
         # Invalida tokens previos sin usar de este usuario (un link vivo a la vez).
         db.execute(
             update(PasswordResetToken)
@@ -652,5 +766,105 @@ def reset_password(request: Request, payload: ResetPasswordIn, db: DbSession = D
         update(Session)
         .where(Session.user_id == user.id, Session.revoked_at.is_(None))
         .values(revoked_at=datetime.now(timezone.utc))
+    )
+    db.commit()
+
+
+@router.post(
+    "/request-reactivation",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("request_reactivation"))],
+)
+@limiter.limit("3/minute")
+def request_reactivation(
+    request: Request,
+    payload: RequestReactivationIn,
+    background: BackgroundTasks,
+    db: DbSession = Depends(get_db),
+):
+    """Pide el link para revivir una cuenta dada de baja por su dueno.
+
+    Responde SIEMPRE 204 y sin cuerpo: que no exista, que este activa o que la haya
+    apagado un admin se ven exactamente iguales (anti-enumeracion). El mail sale en
+    background, asi que tampoco se filtra por timing.
+
+    Mismo rate limit que /forgot-password (3/min) porque el abuso real es el mismo:
+    mandar mails a una casilla ajena y quemar la cuota del proveedor.
+    """
+    user = db.scalar(select(User).where(User.email == payload.email))
+    if user is not None and _is_self_deactivated(user):
+        _issue_reactivation_link(db, user, background)
+
+
+@router.post(
+    "/reactivate",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_captcha("reactivate"))],
+)
+@limiter.limit("5/minute")
+def reactivate_account(
+    request: Request,
+    payload: ReactivateIn,
+    db: DbSession = Depends(get_db),
+):
+    """Consume el token del mail: revive la cuenta Y setea la contraseña nueva.
+
+    UN SOLO PASO a proposito. La alternativa —reactivar y marcar
+    `must_change_password`— obliga a pasar por /cambiar-password, que pide la clave
+    ACTUAL: justo lo que no tiene quien la olvido. Y como aca la clave se SETEA en vez
+    de verificarse, el flujo tambien funciona con cuentas creadas por Google
+    (`password_hash IS NULL`). `auth_provider` no se toca: sigue contando como se dio
+    de alta.
+
+    NO INICIA SESION, igual que /auth/verify-signup y /auth/reset-password: el 2do
+    factor de los admins y toda la logica de `_otp_required` viven en el login, y una
+    segunda puerta que abra sesion es una puerta que no pasa por ahi. Ademas el link
+    sale de una casilla de correo, y uno que auto-loguea convierte el acceso al mail
+    en una sesion.
+
+    NO devuelve los diseños (se borraron en la baja) ni la suscripcion (la preapproval
+    se cancelo en MP y no se puede descancelar). Las dos cosas se avisan en el mail y
+    en el front ANTES de que la persona haga clic.
+    """
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token invalido o expirado")
+
+    token = db.scalar(
+        select(ReactivationToken).where(
+            ReactivationToken.token_hash == hash_token(payload.token)
+        )
+    )
+    if (
+        token is None
+        or token.used_at is not None
+        or token.expires_at <= datetime.now(timezone.utc)
+    ):
+        raise invalid
+
+    user = db.get(User, token.user_id)
+    if user is None:
+        raise invalid
+    # Un admin pudo apagar la cuenta entre que salio el mail y se abrio el link. Ese
+    # caso NO se auto-revive: el link queda inservible, con el mismo 400 generico.
+    if not user.is_active and user.deactivated_at is None:
+        raise invalid
+
+    now = datetime.now(timezone.utc)
+    token.used_at = now
+    user.password_hash = hash_password(payload.password)
+    # La clave la eligio el usuario, asi que deja de ser la temporal de un admin. Sin
+    # esto, una cuenta que nacio con clave del panel, se dio de baja y volvio quedaria
+    # trabada en /cambiar-password con la clave que acaba de elegir.
+    user.must_change_password = False
+    user.is_active = True
+    # Se limpia la constancia de baja: si no, queda una cuenta activa con fecha de baja
+    # y el futuro job de supresion la barreria igual. Mismo criterio que la reactivacion
+    # desde el panel (`PATCH /users/{id}`).
+    user.deactivated_at = None
+    # Un cambio de clave cierra sesion en todos lados. Una cuenta de baja no tiene
+    # ninguna viva, pero esto cubre el caso de la que un admin reactivo entre medio.
+    db.execute(
+        update(Session)
+        .where(Session.user_id == user.id, Session.revoked_at.is_(None))
+        .values(revoked_at=now)
     )
     db.commit()

@@ -75,7 +75,14 @@ backend/
   baja desde `POST /auth/deactivate`. Va **aparte de `is_active`** a propósito — el bool es el
   interruptor que corta el acceso, esta columna es la **constancia** de cuándo entró el pedido
   (sin fecha no se sostiene el plazo del art. 16 de la Ley 25.326). `NULL` + `is_active=False` =
-  la desactivó un admin, no el usuario. Se limpia al reactivar desde el panel.
+  la desactivó un admin, no el usuario. Se limpia al reactivar, tanto desde el panel como por
+  el link de mail (ver flujo de auth #9).
+- **ReactivationToken** (`reactivation_tokens`, migración `0017`): token de un solo uso que
+  revive una cuenta dada de baja por su dueño. Calcado de `PasswordResetToken` (en DB vive solo
+  el HMAC, `used_at` + `expires_at`). Es **tabla aparte y no una columna `purpose`** en
+  `password_reset_tokens` a propósito: así el **tipo de la tabla es el discriminador** y un
+  token de reset no puede revivir una cuenta, sin depender de que ningún `select` futuro se
+  acuerde de filtrar.
 - **User**: `id` (UUID), `email` (único), `full_name`, `password_hash` (**nullable**: los
   usuarios creados por Google no tienen password), `is_active`, `is_admin`, `google_sub`
   (**único, nullable**: `sub` estable de la cuenta de Google para linkeo), `auth_provider`
@@ -201,7 +208,7 @@ backend/
      que el cooldown de 3 min ya subsume.)
 8. **`POST /auth/deactivate`: baja self-service** (2026-08-14, rate-limit 3/min). Es un **borrado
    BLANDO**, no un `DELETE`: pone `is_active=False`, estampa `deactivated_at`, cancela la
-   suscripción en MP y revoca todas las sesiones.
+   suscripción en MP, revoca todas las sesiones y **borra los diseños guardados**.
    - **Por qué blando**: `payments` y `export_logs` referencian al usuario. Un hard delete los
      deja con `user_id=NULL` y se pierde a quién correspondía cada cobro, que es justo lo que la
      normativa fiscal obliga a conservar. El corte de acceso es igual de inmediato: `deps.py`
@@ -213,12 +220,89 @@ backend/
      sin eso MP le **sigue cobrando** a alguien que ya se fue. Es **best-effort**: si MP no
      responde, la baja se persiste igual (revertirla por un fallo de un tercero sería peor) y
      queda un log con "CANCELARLA A MANO".
-   - **La baja se revierte SOLO desde el panel admin** (`PATCH /users/{id}` con
-     `is_active: true`, que además limpia `deactivated_at`). Es imprescindible que exista: la
-     fila sigue ocupando el email (único), así que esa persona no puede entrar **ni volver a
-     registrarse**. Ver el TODO del `CLAUDE.md` raíz.
+   - **El usuario NO se borra, los DISEÑOS sí** (2026-10-05). Se eliminan las filas de
+     `user_designs` **y los objetos en R2**: el CASCADE de la DB no toca el bucket, así que hay
+     que borrarlo explícitamente (mismo helper que usa `DELETE /users/{id}`, que también lo hacía
+     mal y ahora los borra). El historial comercial (`payments`, `export_logs`) queda **intacto**:
+     son tablas aparte y su FK ya es `ON DELETE SET NULL`. O sea que quien vuelve recupera la
+     cuenta y su historial de plan y pagos, pero **empieza sin diseños**. Está declarado en
+     **Términos §14.1** (y por eso subió `TERMS_VERSION`).
+     - **El borrado en R2 va DESPUÉS del commit y en `try/except`**, igual que la cancelación en
+       MP: la baja tiene plazo legal y no puede fallar porque se caiga un tercero.
+       `storage.delete_keys` no atrapa nada, así que sin el `try` un error de R2 sería un **500
+       con la baja ya persistida**. Las filas, en cambio, se borran sí o sí: si quedaran, al
+       reactivar aparecerían tarjetas en `/designs` con miniaturas rotas. Verificado apuntando a
+       un bucket inexistente: 204 + un `logger.error` con las claves a borrar a mano.
+   - **Un admin NO puede darse de baja a sí mismo** (403). Los guards del panel son "no te lo
+     hagas a vos mismo" y este endpoint no pasaba por ninguno, así que el único admin podía
+     quedarse sin poder entrar ni como usuario común. La regla es "los admins no se dan de baja
+     solos", **no** "se bloquea al último": modela un offboarding real y evita la carrera del
+     conteo. El guard va **al principio de la función**, antes del lookup de la suscripción: más
+     abajo se cancela la preapproval, y cortar después dejaría al admin con la suscripción
+     cancelada en un tercero y un 403 encima. Consecuencia buscada: un admin nunca tiene
+     `deactivated_at` con fecha, así que **nunca entra al camino de auto-reactivación**.
+   - **La baja se revierte por dos caminos**: el propio usuario, por mail (#9), o un admin desde
+     `PATCH /users/{id}` con `is_active: true` (que además limpia `deactivated_at`). Lo que sigue
+     sin resolverse es **empezar de cero con el mismo email**: la fila sigue ocupando `email`
+     (único), así que el signup responde 409. Ver el TODO del `CLAUDE.md` raíz.
    - **No pide la contraseña** para confirmar (decisión de producto 2026-08-14). El modal vive
      detrás de una cookie viva; el riesgo asumido es una sesión abierta ajena.
+
+9. **Reactivación self-service POR MAIL** (2026-10-05). Dos endpoints públicos:
+   **`POST /auth/request-reactivation`** (pide el link, rate-limit 3/min, captcha
+   `request_reactivation`) y **`POST /auth/reactivate`** (lo consume, 5/min, captcha
+   `reactivate`). El link es `{FRONTEND_URL}/reactivar?token=…` y vive
+   `reactivation_token_minutes` (60).
+   - **UN SOLO PASO: el link revive la cuenta Y setea la contraseña nueva.** No se manda ninguna
+     clave generada por nosotros —viajaría en texto plano y quedaría viviendo en la casilla— y
+     tampoco se usa `must_change_password`, porque `/cambiar-password` pide la clave **actual**,
+     que es justo lo que no tiene quien la olvidó. Como la clave se **setea** en vez de
+     verificarse, el flujo funciona también con cuentas de Google (`password_hash IS NULL`);
+     `auth_provider` no se toca (cuenta cómo se dio de alta, no cómo entra).
+   - **Tres entradas, un solo mail**: el cartel de `/ingresar` cuando el login devuelve
+     **403 `account_deactivated`**, la página pública `/reactivar`, y **`/forgot-password`**, que
+     para una cuenta dada de baja manda el mail de **reactivación en vez del de reset**. Esa
+     última es la que importa: un link de reset no la haría volver (no reactiva) y encima
+     `/reset-password` lo rechaza por `is_active`, así que era un link que **siempre terminaba en
+     400**. Por eso el guard de `reset_password` se dejó **intacto**: con el desvío, una cuenta
+     inactiva ya no puede tener un reset token vivo, y ese chequeo queda redundante-pero-correcto.
+   - **`deactivated_at` es el discriminador** (`_is_self_deactivated`): con fecha, la baja la
+     pidió el usuario y puede volver; sin fecha e inactiva, la apagó un admin y **no se
+     auto-reactiva** — sería volver deshacible, para el moderado, la única herramienta de
+     moderación que hay.
+   - **NO abre sesión** (204), igual que `/auth/verify-signup` y `/auth/reset-password`: el 2do
+     factor de los admins y toda la lógica de `_otp_required` viven en el login, y una segunda
+     puerta que abra sesión es una puerta que no pasa por ahí. Además el link sale de una casilla
+     de correo, y uno que auto-loguea convierte el acceso al mail en una sesión.
+   - **NO devuelve los diseños** (se borraron en la baja, ver #8) **ni la suscripción** (la
+     preapproval se canceló en MP y no se puede descancelar). Las dos cosas se avisan en el mail
+     y en el front **antes** del clic.
+   - Al consumirlo: `used_at`, `password_hash` nuevo, `must_change_password=False`,
+     `is_active=True`, `deactivated_at=None` y **revoca todas las sesiones** (un cambio de clave
+     cierra sesión en todos lados). Un solo commit. Un link vivo a la vez por usuario.
+   - **Anti-enumeración** — los dos endpoints responden **204 sin cuerpo** en todos los casos, el
+     mail va en `background.add_task` y `_send` nunca levanta, así que ni el timing ni una caída
+     de Resend cambian la respuesta:
+
+     | Estado de la cuenta | `request-reactivation` | `forgot-password` | `login` |
+     | --- | --- | --- | --- |
+     | no existe | 204, sin mail | 204, sin mail | 401 |
+     | activa | 204, **sin mail** | 204 + reset | normal |
+     | baja self-service | 204 + **mail de reactivación** | 204 + **mail de reactivación** | 403 `account_deactivated` |
+     | apagada por admin | 204, **sin mail** | 204, **sin mail** | 403 `"Usuario inactivo"` |
+
+   - `login` revela `account_deactivated` **solo después** de verificar la contraseña: es
+     información que ya tenía quien conoce la credencial, así que no agrega oráculo.
+   - **Techo aceptado**: `forgot-password` y `request-reactivation` son buckets de rate limit
+     distintos, así que una dirección puede recibir hasta **6 mails/min** sumando los dos
+     caminos. Se acepta: romper el patrón "invalidar y reemitir" impediría reintentar cuando el
+     primer mail no llegó. Si aparece abuso, la escalada tiene molde en `has_active_otp` (no
+     emitir mientras haya un token vivo).
+   - **Reemplaza un diseño anterior que nunca salió de `qa`** (commits `678af4b` / `2e156c0`,
+     2026-08-17): reactivaba con **email + contraseña** desde el login, así que quien olvidó la
+     clave recibía **401 antes** de llegar al 403 y nunca veía la oferta, y con una cuenta de
+     Google el `verify_password(…, None)` explotaba. El path `/auth/reactivate` se reusó con body
+     nuevo a propósito: un front viejo recibe **422**, que es un fallo ruidoso.
 
 ## Claves temporales del panel admin (`must_change_password`)
 
@@ -549,7 +633,8 @@ evitar que Render los auto-recree en la región default al deployar). Todos en *
   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `SESSION_SECRET` (dummy —
   `app.config` lo exige).
 - **`scripts/cleanup_expired.py`** — limpieza de **filas vencidas** de tablas efímeras:
-  `sessions`, `password_reset_tokens`, `login_otps`, `pending_registrations` (todas con
+  `sessions`, `password_reset_tokens`, `reactivation_tokens`, `login_otps`,
+  `pending_registrations` (todas con
   `expires_at < now()`). Cron **semanal** (`schedule: "0 13 * * 0"` = domingos 13:00 UTC ≈
   10:00 AR), nombre en Render **`cron-corpolab3d-expired-tokens-cleanup`**. No toca R2 ni manda
   mails. Flag **`--dry-run`**. Env vars: `DATABASE_URL`, `SESSION_SECRET` (dummy).
