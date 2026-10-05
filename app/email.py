@@ -53,6 +53,25 @@ def send_password_reset_email(to_email: str, reset_link: str) -> None:
     _send(to_email, "Restablecer tu contraseña - CorpoLab 3D", html)
 
 
+def send_account_reactivation_email(to_email: str, reactivate_link: str) -> None:
+    """Manda el link que revive una cuenta dada de baja por su dueno.
+
+    UN SOLO PASO: ese link reactiva la cuenta Y pide una contraseña nueva, asi que
+    sirve tambien para quien olvido la suya. NO se manda ninguna clave generada por
+    nosotros: viajaria en texto plano y quedaria viviendo en la casilla.
+    """
+    if not settings.resend_api_key:
+        # Dev / sin proveedor: dejamos el link en los logs para probar el flujo.
+        logger.warning("[DEV] Reactivation link para %s: %s", to_email, reactivate_link)
+        return
+    html = render_email(
+        "account_reactivation.html",
+        reactivate_link=reactivate_link,
+        minutes=settings.reactivation_token_minutes,
+    )
+    _send(to_email, "Volver a activar tu cuenta - CorpoLab 3D", html)
+
+
 def send_signup_verification_email(to_email: str, verify_link: str) -> None:
     """Manda el link de confirmacion de alta (double opt-in). La cuenta se crea recien
     cuando el usuario abre este link."""

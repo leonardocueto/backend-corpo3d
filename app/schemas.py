@@ -181,6 +181,24 @@ class ResetPasswordIn(BaseModel):
     password: str = Field(min_length=8)
 
 
+class RequestReactivationIn(BaseModel):
+    """Pedido del link que revive una cuenta dada de baja (publico, sin sesion)."""
+
+    email: EmailStr
+
+
+class ReactivateIn(BaseModel):
+    """Reactivacion con el token del mail: revive la cuenta Y setea la clave nueva.
+
+    Schema propio aunque la forma coincida con `ResetPasswordIn`: el nombre del
+    schema es la mitad de la documentacion del endpoint en /docs, y aca no se esta
+    reseteando una contraseña sino volviendo a una cuenta.
+    """
+
+    token: str
+    password: str = Field(min_length=8)
+
+
 class AdminUserOut(UserOut):
     """Usuario en el listado admin: agrega tier e intentos de exportacion.
     `export_remaining` es null y `export_unlimited` True para usuarios ilimitados
