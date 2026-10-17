@@ -109,8 +109,21 @@ backend/
 
 1. `POST /auth/login`: valida email+password (bcrypt, se verifica siempre aunque el user no
    exista, para no filtrar por timing) → genera token plano (`secrets.token_urlsafe(32)`) →
-   guarda **solo** `HMAC-SHA256(token, SESSION_SECRET)` con `expires_at = now + 7 días` →
-   setea cookie `HttpOnly; Max-Age=604800; Path=/; SameSite=lax` (+ `Secure` en prod).
+   guarda **solo** `HMAC-SHA256(token, SESSION_SECRET)` con
+   `expires_at = now + SESSION_DAYS` → setea cookie
+   `HttpOnly; Max-Age=SESSION_DAYS*86400; Path=/; SameSite=lax` (+ `Secure` en prod).
+   - **`SESSION_DAYS` vale 2 (48 h) desde el 2026-10-17**, antes 7. El valor vive en
+     **tres** lugares y tienen que coincidir: el default de `config.py` (lo que usan QA
+     y local), `render.yaml` (producción) y `.env.example`. Cambiarlo solo en el
+     dashboard de Render funciona hasta que alguien aplique el blueprint, que lo
+     revierte al valor del archivo.
+   - **El vencimiento es DURO: se fija en el login y no se renueva por uso.** Un
+     usuario activo se queda afuera igual al cumplirse el plazo, en medio de lo que
+     esté haciendo. Eso es lo que hace necesario el cartel de `/ingresar?expired=1`
+     (ver `3D/CLAUDE.md` → "Sesión vencida"): sin él, el rebote al login es mudo y se
+     lee como que la app deslogueó sola. Si algún día molesta la fricción, la salida
+     es expiración deslizante (renovar `expires_at` **y re-emitir la cookie** cuando
+     pasó más de un día desde la última renovación), no alargar el plazo.
 2. `get_current_user` (dependency, `deps.py`): lee la cookie → re-hashea → busca la sesión →
    valida **existe + `revoked_at IS NULL` + no vencida + usuario activo**; si falla → `401`.
    `/auth/me` la reutiliza; **cualquier endpoint futuro protegido debe usar
