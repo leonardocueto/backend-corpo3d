@@ -19,7 +19,9 @@ services:
         # registrable = same-site: "lax" alcanza (Secure lo fuerza ENVIRONMENT=production).
         value: lax
       - key: SESSION_DAYS
-        value: "7"
+        # 2 dias (48 h). Va declarado aca Y en config.py: si solo se cambia en el
+        # dashboard, un apply del blueprint lo revierte al valor de este archivo.
+        value: "2"
       - key: SESSION_SECRET
         generateValue: true
       - key: DATABASE_URL

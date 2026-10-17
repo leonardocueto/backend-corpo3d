@@ -17,7 +17,11 @@ class Settings(BaseSettings):
     cookie_name: str = "session_token"
     cookie_samesite: str = "lax"                # "lax" | "strict" | "none"
     cookie_domain: str | None = None
-    session_days: int = 7
+    # 2 dias (48 h). El vencimiento es DURO: se fija en el login y no se renueva
+    # por uso, asi que este numero es "cada cuanto, como maximo, hay que volver a
+    # ingresar". El default vive aca para que QA y local no queden en otro valor
+    # cuando nadie setea la env (en prod la fija render.yaml).
+    session_days: int = 2
 
     # Recuperacion de contraseña (forgot/reset)
     frontend_url: str = "http://localhost:3000"  # base del link del email
