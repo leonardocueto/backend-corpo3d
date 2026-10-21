@@ -29,17 +29,22 @@ router = APIRouter(prefix="/exports", tags=["exports"])
 DAILY_LIMIT = 3
 WINDOW = timedelta(hours=24)
 
-# Estructuras premium (solo los IDs; las definiciones geometricas viven en el
+# Estructuras GRATIS (solo los IDs; las definiciones geometricas viven en el
 # front, que las necesita para el preview). El gate real de descarga es este:
-# un free puede previsualizarlas pero /exports/download se las rechaza.
-PREMIUM_STRUCTURE_IDS = {
-    "snap-fit-pvc",
-    "double-channel",
-    "snap-lip",
-    "deep-base",
-    "neon-3d",
-    "neon-3d-interior",
-    "corporea-aluminio",
+# un free puede previsualizar cualquier estructura pero /exports/download solo
+# le entrega las de esta lista.
+#
+# La lista esta INVERTIDA a proposito (antes era PREMIUM_STRUCTURE_IDS y habia
+# que sumar cada id nuevo): el catalogo del front crece y esta lista no se
+# actualizaba, asi que cada plantilla premium nueva nacia ABIERTA y el agujero no
+# daba ningun sintoma (el candado de UI corta el camino normal, y el que llega
+# igual se lleva el ZIP descontando un intento). Paso dos veces: "closed-base"
+# quedo afuera desde el 2026-08-05 y "halo-backlit" desde el 2026-10-21. Asi
+# cualquier estructura que no este aca -incluido un structure_id desconocido-
+# requiere cuenta paga, y lo que hay que acordarse de agregar es lo GRATIS, cuyo
+# olvido se nota en el acto: un free no puede descargar la plantilla free.
+FREE_STRUCTURE_IDS = {
+    "open-inner-wall",
 }
 
 # Limites del payload de /exports/download. El entregable trae, ademas del
@@ -202,7 +207,7 @@ def download_export(
 
     # Estructura premium: solo cuentas ilimitadas (detail distinguible del 403
     # de intentos para que el front abra el modal de upsell correcto).
-    if structure_id in PREMIUM_STRUCTURE_IDS and not unlimited:
+    if structure_id not in FREE_STRUCTURE_IDS and not unlimited:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="premium_structure")
 
     # Agujeros (perforaciones de base y cuerpo): feature paga. A diferencia del

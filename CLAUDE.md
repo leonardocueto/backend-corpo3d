@@ -427,7 +427,7 @@ generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
   `GET /exports/attempts` (`unlimited: true`) el cliente se auto-habilitaba descargas
   ilimitadas y estructuras premium. Ahora **la response ES el artefacto**: sin pasar la
   validación no hay archivo, y un override de responses no puede fabricar el ZIP.
-- **Orden de validación** (importa): (1) `structure_id ∈ PREMIUM_STRUCTURE_IDS` y usuario no
+- **Orden de validación** (importa): (1) `structure_id ∉ FREE_STRUCTURE_IDS` y usuario no
   ilimitado → **403 `detail="premium_structure"`** (detail distinguible para que el front abra
   el modal de upsell y no el de "sin intentos"); (2) sanitización del payload (**antes** de
   debitar, así un 4xx no consume intento): sin traversal ni paths absolutos, extensiones en
@@ -438,10 +438,23 @@ generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
 - **`_consume_attempt(db, user_id, now)`**: descuenta bajo `SELECT ... FOR UPDATE` **sin
   commitear** — el commit ocurre recién con el ZIP ya armado, así el debit y la entrega son
   **atómicos** (si el armado falla, el rollback devuelve el intento).
-- `PREMIUM_STRUCTURE_IDS` guarda **solo los IDs**: las definiciones geométricas se quedan en el
-  front a propósito, para que un Free pueda **previsualizar y editar** estructuras premium
-  (funnel de venta). Lo que se corta es la **descarga**, no el preview. Si se agrega una
-  estructura premium al catálogo del front, **agregar su id acá también**.
+- **`FREE_STRUCTURE_IDS` es una lista de lo GRATIS, no de lo premium** (invertida el
+  2026-10-21). Guarda **solo los IDs**: las definiciones geométricas se quedan en el front a
+  propósito, para que un Free pueda **previsualizar y editar** estructuras premium (funnel de
+  venta). Lo que se corta es la **descarga**, no el preview.
+  - **Por qué invertida**: era `PREMIUM_STRUCTURE_IDS` y había que sumar a mano cada id nuevo.
+    El catálogo del front creció y esta lista no, así que **cada plantilla premium nueva nacía
+    abierta** — y el agujero no da ningún síntoma: el candado de UI corta el camino normal, y
+    quien llega igual se lleva el ZIP descontando un intento. Pasó **dos veces**: `closed-base`
+    quedó afuera desde el 2026-08-05 y `halo-backlit` desde el 2026-10-21 (encontrado al
+    revisar, no por un reporte).
+  - Ahora **todo lo que no esté en la lista pide cuenta paga**, incluido un `structure_id`
+    desconocido o basura (fail-closed). Lo que hay que acordarse de agregar es una estructura
+    **gratis** nueva, y ese olvido se nota en el acto: un free no puede descargar la plantilla
+    free. Es la misma asimetría que el mapa de `seo.ts` en el front.
+  - **Sigue habiendo dos listas en dos repos** (acá y el flag `premium` del catálogo del
+    front), pero ya no pueden desincronizarse en la dirección peligrosa: lo máximo que puede
+    pasar es que el backend cobre por algo que el front muestra como gratis.
 - **Residuo aceptado**: los adapters STL/DXF viven en el bundle (los necesita el preview), así
   que scripting activo en consola puede rearmar un ZIP local. Cubrimos el ataque por override
   de responses, que es el realista.
