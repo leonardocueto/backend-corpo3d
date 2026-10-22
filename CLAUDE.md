@@ -590,6 +590,49 @@ hosting es suscripción fija (web Starter ~$7/mes) → gasto predecible, muy por
 tope **duro real** sobre el total solo se logra del lado del **medio de pago** (tarjeta con
 límite).
 
+## Backup de la base (GitHub Actions → R2, 2026-10-22)
+
+`.github/workflows/backup-db.yml`: `pg_dump` diario de la base de **producción** (Neon) en
+formato custom, subido al bucket R2 **`corpolab3d-db-backups`**. Corre a las 06:17 UTC y se
+puede disparar a mano con "Run workflow".
+
+- **Por qué hace falta, si Neon ya tiene restore**: el proyecto está en el plan **Free**, con
+  **6 horas** de historial. Un dato corrompido que se nota al día siguiente ya no se puede
+  recuperar desde Neon. Además ese historial vive en el mismo proyecto: si se borra el proyecto
+  o se compromete la cuenta, se pierde junto con la base. `payments` y `withdrawal_requests`
+  hay que conservarlos por obligación fiscal y legal.
+- **Por qué GitHub Actions y no un cron de Render**: Render cobra un **mínimo de $1/mes por
+  cron job**, aunque corra segundos. En Actions entra en los minutos gratis del repo
+  (~1 min/día). R2 (≤10 GB) y la transferencia de Neon (5 GB/mes en Free) también quedan en
+  el tier gratis: la base pesa ~33 MB y el dump, pocos MB.
+- **Vive solo en `main`**, como `promote.yml`: GitHub corre los `schedule` únicamente desde la
+  rama default.
+- **Retención: lifecycle rules del bucket, no el workflow.** `daily/` se borra a los 30 días y
+  `monthly/` a los 365. La copia mensual es la **primera corrida exitosa de cada mes**, no la
+  del día 1: así un fallo ese día no deja al mes sin copia.
+- **Rol de solo lectura `backup_reader`** (`GRANT pg_read_all_data`), creado por SQL y no desde
+  la pantalla Roles de Neon (esos nacen con `neon_superuser`). Si se filtra el secret, se pueden
+  leer datos pero no escribir ni borrar. `pg_read_all_data` cubre también las tablas de
+  migraciones futuras.
+- **Conexión directa, sin `-pooler`**: el pooler de Neon trabaja en modo transacción y puede
+  cortar el dump.
+- **`PG_MAJOR` del workflow tiene que acompañar a Neon** (hoy 18). Un `pg_dump` más viejo que
+  el servidor falla. Si se sube la versión de Postgres en Neon, subir esa variable.
+- **Token y bucket propios**, separados de los `R2_*` del backend (exportaciones): un token
+  filtrado del backend no alcanza a los backups. El token es `Object Read & Write` limitado a
+  ese bucket.
+- **Secrets del repo**: `BACKUP_DATABASE_URL`, `R2_BACKUP_ACCOUNT_ID`, `R2_BACKUP_ACCESS_KEY_ID`,
+  `R2_BACKUP_SECRET_ACCESS_KEY`. Si uno tiene mal el nombre, llega vacío sin avisar.
+- **Si falla, GitHub manda un mail** a quien modificó por última vez el `schedule`. No hay otro
+  aviso.
+- **Restaurar** (bajar el `.dump` de R2):
+  ```bash
+  pg_restore --no-owner --no-privileges --clean --if-exists --dbname="<URL destino>" corpolab3d-prod-AAAA-MM-DD.dump
+  ```
+  `--no-owner --no-privileges` porque el destino no tiene los mismos roles que producción.
+  Probar contra QA o un Postgres local, **nunca directo contra producción** sin antes haber
+  validado el archivo.
+
 ## Seguridad — invariantes a NO romper
 
 - El token plano vive **solo** en la cookie `HttpOnly`. En DB nunca el token plano, solo su
