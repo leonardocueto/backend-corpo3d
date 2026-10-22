@@ -734,6 +734,14 @@ lleva la misma rama de feature, nunca `qa`.
 
 - **Prohibido** `git push origin origin/dev:qa --force` salvo pedido explícito de Leo.
 - **`dev` no se toca sin pedido explícito**, aunque el testing en `qa` haya salido bien.
+- **`dev` se sincroniza solo con `main`** (2026-10-22, pedido de Leo): `update-dev.yml` mergea
+  `main` en `dev` en cada push a `main` (hotfix, merge de PR). Si el merge tiene conflicto, el job
+  falla sin pushear y se resuelve a mano. Es la unica excepcion a la regla de arriba: lo que entra
+  a `dev` por aca ya esta en `main`.
+  - **La promocion NO lo dispara**: `promote.yml` pushea a `main` con `GITHUB_TOKEN`, y un push
+    hecho con ese token no dispara otros workflows. Por eso `promote.yml` tiene que hacer
+    `git push origin main:dev` despues de `git push origin main`. Ese cambio va **directo en
+    `main`**: `promote.yml` vive solo ahi, y agregarlo desde `dev` choca al promover.
 - Cuidado extra en este repo: **`dev` no deploya nada, pero `qa` y `main` sí**, y `start.sh`
   corre `alembic upgrade head` al arrancar. O sea que **pushear a `qa` aplica las migraciones
   pendientes contra la DB Neon de QA** (y pushear a `main`, contra la de producción). No es un
