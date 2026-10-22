@@ -43,6 +43,54 @@ API en `http://localhost:8000` · Swagger en `/docs` · ReDoc en `/redoc`.
 > Tras reconstruir la imagen, darle ~2 s a Uvicorn antes de pegarle (el contenedor corre sin
 > `--reload`; los cambios de código requieren `docker compose up --build`).
 
+## Tests (pytest + Postgres real)
+
+Suite en `tests/`, corre en CI en cada PR y push a `qa`, `dev` y `main`
+(`.github/workflows/tests.yml`). Agregada el 2026-10-22: hasta ahí el backend no tenía tests.
+
+```bash
+# una sola vez, como superusuario, contra un Postgres LOCAL (nunca Neon):
+psql -h localhost -U postgres -f tests/setup_test_db.sql
+# o con compose:  docker compose exec -T db psql -U postgres < tests/setup_test_db.sql
+
+pip install -r requirements-dev.txt
+TEST_DATABASE_URL=postgresql+psycopg://corpolab_test:corpolab_test@localhost:5432/corpolab_test pytest
+```
+
+- **Postgres real, no SQLite.** Las migraciones y los `FOR UPDATE` se prueban en el mismo
+  motor que producción.
+- **Bases efímeras.** `TEST_DATABASE_URL` apunta a una base de **mantenimiento**
+  (`corpolab_test`) donde solo se emiten `CREATE`/`DROP DATABASE`. Cada corrida crea
+  `corpolab_run_<hex>_test` y la lleva a `head`; cada test de migraciones crea su propia
+  `corpolab_mig_<hex>_test`. Todas se borran al terminar.
+- **Aislamiento aunque el endpoint haga `commit()`.** Cada test corre en una transacción
+  externa y la app recibe una sesión con `join_transaction_mode="create_savepoint"`: el
+  `commit()` solo libera un savepoint y al final se deshace todo. `test_isolation.py` lo
+  verifica desde una conexión aparte. **Si algún endpoint abre su propia sesión en vez de
+  usar `get_db`, ese aislamiento no lo cubre.**
+- **Alembic corre en un subproceso** (`tests/_dbs.py`): `alembic/env.py` lee la URL de
+  `settings`, que se carga una sola vez por proceso.
+- **Guardas** (`tests/_safety.py`). La corrida aborta antes de tocar nada si:
+  - el host no es local (`localhost`, `127.0.0.1`, `::1`, `db`, `postgres`);
+  - la base no termina en `_test`;
+  - el rol tiene superuser, createrole, replication o bypassrls (o le falta createdb);
+  - falta `TEST_DATABASE_URL` (**nunca** cae en `DATABASE_URL`);
+  - `ENVIRONMENT=production`.
+  Además el `DROP` solo acepta `^corpolab_(run|mig)_[0-9a-f]{10}_test$`, y Postgres no deja
+  que el rol borre bases ajenas.
+- **Sin servicios externos.** La suite pisa las variables de la app (ganan sobre un `.env`
+  local): Resend, Turnstile, R2, Mercado Pago, Google y Redis quedan vacíos, y se verifica
+  después de importar la app. Los mails se interceptan con el fixture `outbox` y la subida
+  a R2 del log de exportación con un mock. Sin Redis, el login de un admin responde 503:
+  los tests usan usuarios comunes.
+- **Rate limit apagado** en la suite (todos los requests salen de la misma IP).
+- **CI**: el superusuario del servicio de Postgres solo crea el rol restringido; los tests
+  corren con ese rol y el workflow no recibe ningún secret.
+- **`test_migrations.py`** sube, baja hasta `base` y vuelve a subir; exige una sola cabeza;
+  corre `alembic check` (un cambio en `models.py` sin su migración falla); y sube a `head`
+  una base con datos de la revisión anterior. **Cada migración nueva suma ahí sus asserts
+  sobre datos existentes.**
+
 ## Estructura
 
 ```
@@ -473,9 +521,9 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   - **Caso real que lo destapó**: `car***@gmail.com`, alta 2026-08-28 17:47, tier vencido
     2026-09-27 mientras MP debitaba el 2026-09-28. Una sola fila en `payments` en un mes, y con
     `subscription_id = NULL` — la firma de que el cobro había entrado por el handler legacy.
-  - **Sin cobertura automatizada**: el backend no tiene tests. Este camino se verificó a mano
-    contra Postgres con las migraciones aplicadas y un SDK de MP stubbeado. Ver el TODO en la
-    raíz.
+  - **Sin cobertura automatizada**: la suite de `tests/` (ver "Tests") todavía no cubre los
+    webhooks de MP. Este camino se verificó a mano contra Postgres con las migraciones
+    aplicadas y un SDK de MP stubbeado. Ver el TODO en la raíz.
 - **Cancelar ≠ reembolsar (2026-08-09; endpoint alineado y auto-cancel en reembolso 2026-08-10).**
   Son dos efectos distintos sobre el tier:
   - **Cancelada o pausada** → corta los cobros **futuros**, pero **el tier pago se conserva hasta

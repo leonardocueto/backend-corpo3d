@@ -1,0 +1,4 @@
+# Dependencias de la suite de tests (ademas de requirements.txt). No van al
+# contenedor de produccion.
+-r requirements.txt
+pytest>=8.3
