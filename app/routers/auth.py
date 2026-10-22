@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import (
     APIRouter,
@@ -30,14 +30,14 @@ from app.models import (
     Subscription,
     User,
 )
-from app.otp import RedisUnavailableError, has_active_otp
-from app.otp import store_otp as redis_store_otp
-from app.otp import verify_otp as redis_verify_otp
+from app.otp import RedisUnavailableError, has_active_otp, store_otp as redis_store_otp, verify_otp as redis_verify_otp
 from app.ratelimit import limiter
+
 # `payments` no importa `auth`, asi que no hay ciclo.
 from app.routers.payments import cancel_preapproval
 from app.routers.tiers import sync_user_tier
 from app.schemas import (
+    AcceptLegalIn,
     ChangePasswordIn,
     ForgotPasswordIn,
     GoogleAuthIn,
@@ -46,7 +46,6 @@ from app.schemas import (
     RegisterIn,
     ResendOtpIn,
     ResetPasswordIn,
-    AcceptLegalIn,
     SignupIn,
     UserOut,
     VerifyOtpIn,
@@ -89,13 +88,13 @@ def _start_session(db: DbSession, user: User, response: Response) -> None:
         Session(
             user_id=user.id,
             token_hash=hash_session_token(token),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.session_days),
+            expires_at=datetime.now(UTC) + timedelta(days=settings.session_days),
         )
     )
     db.commit()
     # Reconcilia el tier una vez por login: si su tier pago vencio, lo degrada a
     # free (el login solo degrada; "pagar" es accion del admin via PUT /tiers).
-    sync_user_tier(db, user, datetime.now(timezone.utc))
+    sync_user_tier(db, user, datetime.now(UTC))
     _set_session_cookie(response, token)
 
 
@@ -148,7 +147,9 @@ def login(
     try:
         _issue_login_otp(user, background)
     except RedisUnavailableError:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible"
+        ) from None
     return LoginResponse(otp_required=True)
 
 
@@ -175,7 +176,9 @@ def verify_otp(
     try:
         ok = redis_verify_otp(user.id, hash_token(payload.code))
     except RedisUnavailableError:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible"
+        ) from None
     if not ok:
         raise invalid
 
@@ -214,7 +217,9 @@ def resend_otp(
             return
         _issue_login_otp(user, background)
     except RedisUnavailableError:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicio temporalmente no disponible"
+        ) from None
 
 
 @router.post(
@@ -239,7 +244,7 @@ def google_login(
         info = verify_google_id_token(payload.credential)
     except GoogleAuthError:
         # Token invalido/expirado/aud incorrecta, o Google sin configurar.
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credencial de Google invalida")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Credencial de Google invalida") from None
 
     # email_verified obligatorio: solo asi es seguro crear/linkear por email.
     if not info.get("email_verified"):
@@ -282,13 +287,13 @@ def google_login(
         Session(
             user_id=user.id,
             token_hash=hash_session_token(token),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.session_days),
+            expires_at=datetime.now(UTC) + timedelta(days=settings.session_days),
         )
     )
     db.commit()
 
     # Reconcilia el tier (degrada si vencio); no-op para un usuario recien creado.
-    sync_user_tier(db, user, datetime.now(timezone.utc))
+    sync_user_tier(db, user, datetime.now(UTC))
 
     _set_session_cookie(response, token)
     return user
@@ -307,7 +312,7 @@ def logout(request: Request, response: Response, db: DbSession = Depends(get_db)
             select(Session).where(Session.token_hash == hash_session_token(token))
         )
         if session and session.revoked_at is None:
-            session.revoked_at = datetime.now(timezone.utc)
+            session.revoked_at = datetime.now(UTC)
             db.commit()
     # delete_cookie debe matchear path/samesite/secure/domain para que el navegador la borre
     response.delete_cookie(
@@ -373,7 +378,7 @@ def signup(
             PendingRegistration.email == payload.email,
             PendingRegistration.used_at.is_(None),
         )
-        .values(used_at=datetime.now(timezone.utc))
+        .values(used_at=datetime.now(UTC))
     )
     token = generate_token()
     db.add(
@@ -382,14 +387,14 @@ def signup(
             full_name=payload.full_name,
             password_hash=hash_password(payload.password),
             token_hash=hash_token(token),
-            expires_at=datetime.now(timezone.utc)
+            expires_at=datetime.now(UTC)
             + timedelta(minutes=settings.signup_token_minutes),
             # Aceptacion de los legales: los bools ya los exigio SignupIn (422 si
             # alguno no viene True). Las VERSIONES las pone el servidor, no el
             # cliente. Se sellan las dos: el alta nueva nunca pasa por /politicas.
-            terms_accepted_at=datetime.now(timezone.utc),
+            terms_accepted_at=datetime.now(UTC),
             terms_version=settings.terms_version,
-            privacy_accepted_at=datetime.now(timezone.utc),
+            privacy_accepted_at=datetime.now(UTC),
             privacy_version=settings.privacy_version,
         )
     )
@@ -425,12 +430,12 @@ def verify_signup(
     if (
         pending is None
         or pending.used_at is not None
-        or pending.expires_at <= datetime.now(timezone.utc)
+        or pending.expires_at <= datetime.now(UTC)
     ):
         raise invalid
 
     # Consumimos el token pase lo que pase (single-use).
-    pending.used_at = datetime.now(timezone.utc)
+    pending.used_at = datetime.now(UTC)
 
     # Guard de carrera / doble click: si la cuenta ya existe, no duplicamos; devolvemos
     # el usuario existente (idempotente).
@@ -480,7 +485,7 @@ def accept_legal(
     los documentos que vienen en `true`: aceptar uno solo deja el otro pendiente (el
     usuario sigue bloqueado, que es lo correcto) en vez de sellar los dos de prepo.
     Idempotente: re-aceptar solo refresca la fecha."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if payload.accept_terms:
         user.terms_accepted_at = now
         user.terms_version = settings.terms_version
@@ -553,7 +558,7 @@ def deactivate_account(
             user.id, sub.mp_preapproval_id,
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     user.is_active = False
     user.deactivated_at = now
     # La sesion actual moriria igual en el proximo request por el chequeo de
@@ -599,14 +604,14 @@ def forgot_password(
                 PasswordResetToken.user_id == user.id,
                 PasswordResetToken.used_at.is_(None),
             )
-            .values(used_at=datetime.now(timezone.utc))
+            .values(used_at=datetime.now(UTC))
         )
         token = generate_token()
         db.add(
             PasswordResetToken(
                 user_id=user.id,
                 token_hash=hash_token(token),
-                expires_at=datetime.now(timezone.utc)
+                expires_at=datetime.now(UTC)
                 + timedelta(minutes=settings.reset_token_minutes),
             )
         )
@@ -633,7 +638,7 @@ def reset_password(request: Request, payload: ResetPasswordIn, db: DbSession = D
     if (
         reset is None
         or reset.used_at is not None
-        or reset.expires_at <= datetime.now(timezone.utc)
+        or reset.expires_at <= datetime.now(UTC)
     ):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token invalido o expirado")
 
@@ -646,11 +651,11 @@ def reset_password(request: Request, payload: ResetPasswordIn, db: DbSession = D
     # ser temporal. Sin esto, alguien que recibio una clave del panel y despues uso
     # "olvide mi contraseña" quedaria trabado en /cambiar-password para siempre.
     user.must_change_password = False
-    reset.used_at = datetime.now(timezone.utc)
+    reset.used_at = datetime.now(UTC)
     # Revocar todas las sesiones activas: un reset cierra la sesion en todos lados.
     db.execute(
         update(Session)
         .where(Session.user_id == user.id, Session.revoked_at.is_(None))
-        .values(revoked_at=datetime.now(timezone.utc))
+        .values(revoked_at=datetime.now(UTC))
     )
     db.commit()

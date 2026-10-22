@@ -1,0 +1,3 @@
+# Herramientas de CI y desarrollo. Pin exacto: una version nueva de Ruff puede
+# sumar reglas y poner el CI en rojo sin que haya cambiado el codigo.
+ruff==0.16.9

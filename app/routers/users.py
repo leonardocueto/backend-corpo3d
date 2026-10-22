@@ -5,7 +5,7 @@ Todos los endpoints requieren admin (dependency a nivel router). La salida usa
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -52,7 +52,7 @@ def list_users(
     Los admins se filtran por su tier real (el "Admin" de la columna Tier es solo
     una etiqueta de presentacion del front).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     filters = []
     if status_filter is not None:
         filters.append(User.is_active.is_(status_filter == "active"))
@@ -181,7 +181,7 @@ def create_user(payload: UserCreate, db: DbSession = Depends(get_db)):
     # admin es ilimitado por rol). Los intentos no se cargan a mano: free=3 por
     # defecto, pagos = ilimitado por el tier.
     if not user.is_admin and payload.tier in PAID_TIERS:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db.add(
             UserTier(
                 user_id=user.id,
@@ -228,9 +228,12 @@ def update_user(
 
     # Email unico (si cambia, chequear que no lo tenga otro usuario).
     new_email = data.get("email")
-    if new_email and new_email != user.email:
-        if db.scalar(select(User).where(User.email == new_email, User.id != user_id)):
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="Email ya registrado")
+    if (
+        new_email
+        and new_email != user.email
+        and db.scalar(select(User).where(User.email == new_email, User.id != user_id))
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Email ya registrado")
 
     for field, value in data.items():
         setattr(user, field, value)

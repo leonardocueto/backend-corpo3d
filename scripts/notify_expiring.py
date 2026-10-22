@@ -9,7 +9,7 @@ periodo vuelve a avisar.
 
 `--dry-run`: lista a quien se le avisaria SIN enviar ni estampar (para verificar)."""
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import exists, select
 
@@ -30,7 +30,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     window_end = now + timedelta(days=settings.tier_expiry_warning_days)
     renew_link = f"{settings.frontend_url.rstrip('/')}/pricing"
 
