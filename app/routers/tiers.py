@@ -1,6 +1,6 @@
 import calendar
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -298,7 +298,7 @@ def my_tier(
     tier.subscription_id): a quien tiene debito automatico no hay que avisarle nada,
     porque MP le cobra solo. Si los dos criterios divergieran, un usuario recibiria
     el mail y no el cartel, o al reves."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     tier = sync_user_tier(db, user, now)
     auto_renew = bool(
         db.scalar(
@@ -337,7 +337,7 @@ def set_user_tier(
             detail="No se puede asignar tier a un admin (es ilimitado)",
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if payload.tier == "free":
         tier = _get_or_create_locked(db, user_id)
         tier.tier = "free"

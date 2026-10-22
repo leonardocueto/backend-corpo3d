@@ -36,6 +36,9 @@ docker compose down -v       # borra también los datos
 
 # inspeccionar la DB
 docker compose exec db psql -U postgres -d dashboard -c "SELECT email, is_admin FROM users;"
+
+# lint (la misma version que el CI: pip install -r requirements-dev.txt)
+ruff check --fix app scripts alembic
 ```
 
 API en `http://localhost:8000` · Swagger en `/docs` · ReDoc en `/redoc`.
@@ -834,6 +837,22 @@ templates branded de los mails (header/footer + tema claro, Jinja2 en `app/maili
   no el código ni estos docs.
 - Lógica de validación de sesión: **una sola** (`get_current_user`); no duplicarla por endpoint.
 - Cambios de schema → nueva migración Alembic en `alembic/versions/`, no editar la `0001`.
+- **CI (`.github/workflows/quality-check.yml`, 2026-10-22)**: corre en cada PR y en cada push a
+  `dev`/`qa`/`main`, con dos jobs.
+  - **`lint`**: `ruff check`. La config vive en `pyproject.toml`, que es solo de herramientas:
+    no hay paquete y no toca el build de Docker. **`B008` va ignorada a propósito**: es
+    `Depends()` como default, el patrón de FastAPI. `alembic/versions` queda excluida porque
+    las migraciones aplicadas no se reescriben por estilo. Ruff va con **pin exacto** en
+    `requirements-dev.txt`: una versión nueva puede sumar reglas y poner el CI en rojo sin que
+    haya cambiado el código. Para subirla, se cambia el pin y se arregla lo que aparezca en el
+    mismo PR.
+  - **`migrations`**: Postgres 16 de servicio. Corre `alembic upgrade head` sobre una DB vacía,
+    después `alembic check` y al final `downgrade base` + `upgrade head`. Es lo único que prueba
+    las migraciones antes de que `start.sh` las aplique en QA o producción. **`alembic check`
+    falla si se cambia `models.py` sin escribir la migración**, y la ida y vuelta asegura que
+    cada `downgrade()` sirva para revertir.
+  - **No hay `ruff format`, ni mypy, ni tests, a propósito**: el formato reescribía 34 de 47
+    archivos de una.
 - `psycopg[binary]` en local (Windows/glibc) y en el contenedor (hay wheels musllinux; trae
   `libpq` embebida — psycopg puro falla en Alpine por `ctypes.find_library`).
 

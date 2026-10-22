@@ -7,7 +7,7 @@ login_otps ya no se limpia aca: los OTPs viven en Redis con TTL nativo.
 
 `--dry-run`: muestra cuantas filas se borrarian SIN borrar."""
 import argparse
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select
 
@@ -30,7 +30,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     db = SessionLocal()
     try:
         for name, model, expires_col in TABLES:
