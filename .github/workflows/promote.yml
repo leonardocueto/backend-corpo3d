@@ -57,3 +57,4 @@ jobs:
           git checkout -B main origin/main
           git merge origin/dev -m "ci: promote dev to main"
           git push origin main
+          git push origin main:dev
