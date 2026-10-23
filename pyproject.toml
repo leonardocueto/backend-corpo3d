@@ -1,0 +1,20 @@
+# Solo configuracion de herramientas: no es un paquete instalable y no cambia
+# nada del build de Docker ni de Render.
+
+[tool.ruff]
+# Mismo Python que el Dockerfile (python:3.12-alpine).
+target-version = "py312"
+line-length = 120
+# Las migraciones ya aplicadas no se reescriben por estilo.
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+# B008: Depends()/Query() como default de un parametro es el patron de FastAPI.
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+# La carpeta alembic/ del repo hace que Ruff tome el paquete `alembic` como propio.
+known-third-party = ["alembic"]
+# `from x import A as B, c` en una sola linea, como ya estaba escrito.
+combine-as-imports = true

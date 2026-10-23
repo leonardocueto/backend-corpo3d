@@ -1,4 +1,9 @@
-# Dependencias de la suite de tests (ademas de requirements.txt). No van al
-# contenedor de produccion.
+# Herramientas de CI y desarrollo (no van al contenedor de produccion).
+# Incluye las dependencias de la app: la suite de tests la importa entera.
 -r requirements.txt
+
+# Pin exacto: una version nueva de Ruff puede sumar reglas y poner el CI en rojo
+# sin que haya cambiado el codigo.
+ruff==0.16.9
+
 pytest>=8.3

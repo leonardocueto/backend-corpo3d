@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 import mercadopago
@@ -458,7 +458,7 @@ def _handle_subscription_status(
 
     to_email = user.email
     label, period_every, period_each = plan_copy(sub.plan)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if mp_status == "authorized":
         tier = activate_subscription_tier(db, user.id, sub.plan, sub.id, now)
@@ -754,7 +754,7 @@ def _process_subscription_charge(
         # Sin `sub` (cobro cuya preapproval no esta en la base) se activa igual, sin
         # link: cobrarle a alguien y no darle el tier es peor que un tier sin
         # trazabilidad.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if sub is not None:
             tier = activate_subscription_tier(db, user_id, plan, sub.id, now)
         else:
@@ -845,7 +845,7 @@ def _handle_one_time_payment(
     amount = int(payment_data.get("transaction_amount") or 0)
 
     if mp_status == "approved":
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         tier = activate_paid_tier(db, user_id, plan, now)
         expires_str = format_date(tier.expires_at)
         db.add(
@@ -984,7 +984,7 @@ def resolve_withdrawal(
     row = db.get(WithdrawalRequest, request_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Solicitud no encontrada")
-    row.resolved_at = datetime.now(timezone.utc) if payload.resolved else None
+    row.resolved_at = datetime.now(UTC) if payload.resolved else None
     db.commit()
     db.refresh(row)
     return row

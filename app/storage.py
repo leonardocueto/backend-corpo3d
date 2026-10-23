@@ -15,6 +15,7 @@ legible):
 
 import base64
 import json
+import logging as _log
 import re
 import uuid
 from datetime import datetime
@@ -128,8 +129,6 @@ def delete_keys(*keys: str) -> None:
 
 
 # ---- Export audit logs ----
-
-import logging as _log
 
 _export_log_logger = _log.getLogger("storage.export_log")
 

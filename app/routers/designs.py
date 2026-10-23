@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, select
@@ -119,7 +119,7 @@ def create_design(
             detail=f"Limite de {MAX_DESIGNS} disenos alcanzado",
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     design_id = uuid.uuid4()
     json_key, thumb_key = storage.design_keys(user.id, design_id, name, now)
     storage.put_design(json_key, thumb_key, payload.data, payload.thumbnail)

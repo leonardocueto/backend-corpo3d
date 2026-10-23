@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -88,7 +88,7 @@ def get_current_user(request: Request, db: DbSession = Depends(get_db)) -> User:
     if session is None or session.revoked_at is not None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Sesion invalida")
 
-    if session.expires_at <= datetime.now(timezone.utc):
+    if session.expires_at <= datetime.now(UTC):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Sesion expirada")
 
     user = session.user
@@ -139,6 +139,6 @@ def get_paid_user(
     pagas (ej. disenos guardados). Reusa la fuente unica de verdad de tiers."""
     from app.routers.tiers import user_is_unlimited
 
-    if not user_is_unlimited(db, user, datetime.now(timezone.utc)):
+    if not user_is_unlimited(db, user, datetime.now(UTC)):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Requiere cuenta paga")
     return user

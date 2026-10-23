@@ -4,11 +4,21 @@ import posixpath
 import re
 import uuid
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from PIL import Image, ImageDraw, ImageFont
-
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
@@ -96,7 +106,7 @@ def get_attempts(
 ) -> ExportAttemptsOut:
     """Intentos restantes del usuario para la ventana actual. Solo lectura: no
     crea ni resetea la fila (una ventana expirada se reporta como fresca)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if user_is_unlimited(db, user, now):
         return _admin_response()
 
@@ -197,7 +207,7 @@ def download_export(
     override de responses en devtools no puede fabricar el ZIP del diseno actual.
     El debit y la entrega son atomicos (commit recien con el ZIP armado).
     Registra un ExportLog de auditoria y sube el .txt a R2 en background."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     unlimited = user_is_unlimited(db, user, now)
 
     # Estructura premium: solo cuentas ilimitadas (detail distinguible del 403
@@ -259,7 +269,7 @@ def download_export(
         .order_by(Payment.created_at.desc())
         .limit(1)
     )
-    downloaded_at = datetime.now(timezone.utc)
+    downloaded_at = datetime.now(UTC)
     log = ExportLog(
         user_id=user.id,
         payment_id=last_payment.id if last_payment else None,
@@ -306,7 +316,7 @@ def set_user_attempts(
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if user_is_unlimited(db, target, now):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

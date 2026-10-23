@@ -6,7 +6,7 @@ y sus archivos .txt (R2) que superan `export_log_retention_days` (default 180 =
 
 `--dry-run`: lista lo que se borraria SIN borrar."""
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
 
@@ -27,7 +27,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.export_log_retention_days)
+    cutoff = datetime.now(UTC) - timedelta(days=settings.export_log_retention_days)
 
     db = SessionLocal()
     total_deleted = 0
