@@ -6,7 +6,7 @@ memoria. El resto corre de verdad: intentos, estructura premium, agujeros, PDF.
 
 import io
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -37,8 +37,8 @@ def _paid(db_session, user):
         UserTier(
             user_id=user.id,
             tier="mensual",
-            paid_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            paid_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
     )
     db_session.commit()

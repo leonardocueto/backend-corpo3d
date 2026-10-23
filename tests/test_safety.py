@@ -92,8 +92,9 @@ def test_la_corrida_usa_un_rol_restringido(maintenance_url):
 
 
 def test_la_app_apunta_a_la_base_efimera():
-    from app.config import settings
     from sqlalchemy.engine import make_url
+
+    from app.config import settings
 
     name = make_url(settings.database_url).database
     assert name.startswith("corpolab_run_") and name.endswith("_test")

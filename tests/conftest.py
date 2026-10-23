@@ -135,7 +135,7 @@ PASSWORD = "clave-de-prueba-123"
 def make_user(db_session):
     """Crea un usuario con los legales vigentes aceptados. `**overrides` pisa
     cualquier columna (p. ej. `privacy_version="legacy-backfill"`)."""
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
 
     from app.config import settings
     from app.models import User
@@ -145,7 +145,7 @@ def make_user(db_session):
 
     def _make(**overrides):
         counter["n"] += 1
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fields = dict(
             email=f"user{counter['n']}@example.com",
             full_name="Usuario de Prueba",
