@@ -7,6 +7,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
 from app.origin_guard import OriginGuardMiddleware
+from app.timing import RequestStartMiddleware
 from app.ratelimit import limiter
 from app.routers import auth, designs, exports, payments, tiers, users
 
@@ -18,6 +19,11 @@ app = FastAPI(title="Dashboard API")
 # por endpoint se declaran con @limiter.limit(...) en los routers.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Marca de inicio del request para `Server-Timing` (ver `app/timing.py`). Va PRIMERO,
+# o sea innermost: no responde nada, asi que no cambia el orden de guard y CORS, y
+# sigue estampando antes de que se reciba el body.
+app.add_middleware(RequestStartMiddleware)
 
 # Guard de origen: solo se activa si ORIGIN_SECRET esta seteada (FAIL-OPEN
 # deliberado para dev/local y para el rollout: se deploya inactivo y se prende
@@ -37,6 +43,9 @@ app.add_middleware(
     allow_credentials=True,                # permite enviar/recibir la cookie
     allow_methods=["*"],
     allow_headers=["*"],
+    # Sin esto el front no puede leer los tiempos por etapa de `/exports/download`
+    # (CORS solo expone por default un puñado de headers "simples").
+    expose_headers=["Server-Timing"],
 )
 
 app.include_router(auth.router)
