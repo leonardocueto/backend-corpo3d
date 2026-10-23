@@ -43,6 +43,54 @@ API en `http://localhost:8000` · Swagger en `/docs` · ReDoc en `/redoc`.
 > Tras reconstruir la imagen, darle ~2 s a Uvicorn antes de pegarle (el contenedor corre sin
 > `--reload`; los cambios de código requieren `docker compose up --build`).
 
+## Tests (pytest + Postgres real)
+
+Suite en `tests/`, corre en CI en cada PR y push a `qa`, `dev` y `main`
+(`.github/workflows/tests.yml`). Agregada el 2026-10-22: hasta ahí el backend no tenía tests.
+
+```bash
+# una sola vez, como superusuario, contra un Postgres LOCAL (nunca Neon):
+psql -h localhost -U postgres -f tests/setup_test_db.sql
+# o con compose:  docker compose exec -T db psql -U postgres < tests/setup_test_db.sql
+
+pip install -r requirements-dev.txt
+TEST_DATABASE_URL=postgresql+psycopg://corpolab_test:corpolab_test@localhost:5432/corpolab_test pytest
+```
+
+- **Postgres real, no SQLite.** Las migraciones y los `FOR UPDATE` se prueban en el mismo
+  motor que producción.
+- **Bases efímeras.** `TEST_DATABASE_URL` apunta a una base de **mantenimiento**
+  (`corpolab_test`) donde solo se emiten `CREATE`/`DROP DATABASE`. Cada corrida crea
+  `corpolab_run_<hex>_test` y la lleva a `head`; cada test de migraciones crea su propia
+  `corpolab_mig_<hex>_test`. Todas se borran al terminar.
+- **Aislamiento aunque el endpoint haga `commit()`.** Cada test corre en una transacción
+  externa y la app recibe una sesión con `join_transaction_mode="create_savepoint"`: el
+  `commit()` solo libera un savepoint y al final se deshace todo. `test_isolation.py` lo
+  verifica desde una conexión aparte. **Si algún endpoint abre su propia sesión en vez de
+  usar `get_db`, ese aislamiento no lo cubre.**
+- **Alembic corre en un subproceso** (`tests/_dbs.py`): `alembic/env.py` lee la URL de
+  `settings`, que se carga una sola vez por proceso.
+- **Guardas** (`tests/_safety.py`). La corrida aborta antes de tocar nada si:
+  - el host no es local (`localhost`, `127.0.0.1`, `::1`, `db`, `postgres`);
+  - la base no termina en `_test`;
+  - el rol tiene superuser, createrole, replication o bypassrls (o le falta createdb);
+  - falta `TEST_DATABASE_URL` (**nunca** cae en `DATABASE_URL`);
+  - `ENVIRONMENT=production`.
+  Además el `DROP` solo acepta `^corpolab_(run|mig)_[0-9a-f]{10}_test$`, y Postgres no deja
+  que el rol borre bases ajenas.
+- **Sin servicios externos.** La suite pisa las variables de la app (ganan sobre un `.env`
+  local): Resend, Turnstile, R2, Mercado Pago, Google y Redis quedan vacíos, y se verifica
+  después de importar la app. Los mails se interceptan con el fixture `outbox` y la subida
+  a R2 del log de exportación con un mock. Sin Redis, el login de un admin responde 503:
+  los tests usan usuarios comunes.
+- **Rate limit apagado** en la suite (todos los requests salen de la misma IP).
+- **CI**: el superusuario del servicio de Postgres solo crea el rol restringido; los tests
+  corren con ese rol y el workflow no recibe ningún secret.
+- **`test_migrations.py`** sube, baja hasta `base` y vuelve a subir; exige una sola cabeza;
+  corre `alembic check` (un cambio en `models.py` sin su migración falla); y sube a `head`
+  una base con datos de la revisión anterior. **Cada migración nueva suma ahí sus asserts
+  sobre datos existentes.**
+
 ## Estructura
 
 ```
@@ -570,9 +618,9 @@ usuario autoriza el débito automático. **Standalone** (sin `preapproval_plan`)
   - **Caso real que lo destapó**: `car***@gmail.com`, alta 2026-08-28 17:47, tier vencido
     2026-09-27 mientras MP debitaba el 2026-09-28. Una sola fila en `payments` en un mes, y con
     `subscription_id = NULL` — la firma de que el cobro había entrado por el handler legacy.
-  - **Sin cobertura automatizada**: el backend no tiene tests. Este camino se verificó a mano
-    contra Postgres con las migraciones aplicadas y un SDK de MP stubbeado. Ver el TODO en la
-    raíz.
+  - **Sin cobertura automatizada**: la suite de `tests/` (ver "Tests") todavía no cubre los
+    webhooks de MP. Este camino se verificó a mano contra Postgres con las migraciones
+    aplicadas y un SDK de MP stubbeado. Ver el TODO en la raíz.
 - **Cancelar ≠ reembolsar (2026-08-09; endpoint alineado y auto-cancel en reembolso 2026-08-10).**
   Son dos efectos distintos sobre el tier:
   - **Cancelada o pausada** → corta los cobros **futuros**, pero **el tier pago se conserva hasta
@@ -687,6 +735,49 @@ min, 500 min gratis/mes**. Está en **$0** a propósito → se usan los 500 grat
 hosting es suscripción fija (web Starter ~$7/mes) → gasto predecible, muy por debajo de $20. Un
 tope **duro real** sobre el total solo se logra del lado del **medio de pago** (tarjeta con
 límite).
+
+## Backup de la base (GitHub Actions → R2, 2026-10-22)
+
+`.github/workflows/backup-db.yml`: `pg_dump` diario de la base de **producción** (Neon) en
+formato custom, subido al bucket R2 **`corpolab3d-db-backups`**. Corre a las 06:17 UTC y se
+puede disparar a mano con "Run workflow".
+
+- **Por qué hace falta, si Neon ya tiene restore**: el proyecto está en el plan **Free**, con
+  **6 horas** de historial. Un dato corrompido que se nota al día siguiente ya no se puede
+  recuperar desde Neon. Además ese historial vive en el mismo proyecto: si se borra el proyecto
+  o se compromete la cuenta, se pierde junto con la base. `payments` y `withdrawal_requests`
+  hay que conservarlos por obligación fiscal y legal.
+- **Por qué GitHub Actions y no un cron de Render**: Render cobra un **mínimo de $1/mes por
+  cron job**, aunque corra segundos. En Actions entra en los minutos gratis del repo
+  (~1 min/día). R2 (≤10 GB) y la transferencia de Neon (5 GB/mes en Free) también quedan en
+  el tier gratis: la base pesa ~33 MB y el dump, pocos MB.
+- **Vive solo en `main`**, como `promote.yml`: GitHub corre los `schedule` únicamente desde la
+  rama default.
+- **Retención: lifecycle rules del bucket, no el workflow.** `daily/` se borra a los 30 días y
+  `monthly/` a los 365. La copia mensual es la **primera corrida exitosa de cada mes**, no la
+  del día 1: así un fallo ese día no deja al mes sin copia.
+- **Rol de solo lectura `backup_reader`** (`GRANT pg_read_all_data`), creado por SQL y no desde
+  la pantalla Roles de Neon (esos nacen con `neon_superuser`). Si se filtra el secret, se pueden
+  leer datos pero no escribir ni borrar. `pg_read_all_data` cubre también las tablas de
+  migraciones futuras.
+- **Conexión directa, sin `-pooler`**: el pooler de Neon trabaja en modo transacción y puede
+  cortar el dump.
+- **`PG_MAJOR` del workflow tiene que acompañar a Neon** (hoy 18). Un `pg_dump` más viejo que
+  el servidor falla. Si se sube la versión de Postgres en Neon, subir esa variable.
+- **Token y bucket propios**, separados de los `R2_*` del backend (exportaciones): un token
+  filtrado del backend no alcanza a los backups. El token es `Object Read & Write` limitado a
+  ese bucket.
+- **Secrets del repo**: `BACKUP_DATABASE_URL`, `R2_BACKUP_ACCOUNT_ID`, `R2_BACKUP_ACCESS_KEY_ID`,
+  `R2_BACKUP_SECRET_ACCESS_KEY`. Si uno tiene mal el nombre, llega vacío sin avisar.
+- **Si falla, GitHub manda un mail** a quien modificó por última vez el `schedule`. No hay otro
+  aviso.
+- **Restaurar** (bajar el `.dump` de R2):
+  ```bash
+  pg_restore --no-owner --no-privileges --clean --if-exists --dbname="<URL destino>" corpolab3d-prod-AAAA-MM-DD.dump
+  ```
+  `--no-owner --no-privileges` porque el destino no tiene los mismos roles que producción.
+  Probar contra QA o un Postgres local, **nunca directo contra producción** sin antes haber
+  validado el archivo.
 
 ## Seguridad — invariantes a NO romper
 
@@ -832,6 +923,14 @@ lleva la misma rama de feature, nunca `qa`.
 
 - **Prohibido** `git push origin origin/dev:qa --force` salvo pedido explícito de Leo.
 - **`dev` no se toca sin pedido explícito**, aunque el testing en `qa` haya salido bien.
+- **`dev` se sincroniza solo con `main`** (2026-10-22, pedido de Leo): `update-dev.yml` mergea
+  `main` en `dev` en cada push a `main` (hotfix, merge de PR). Si el merge tiene conflicto, el job
+  falla sin pushear y se resuelve a mano. Es la unica excepcion a la regla de arriba: lo que entra
+  a `dev` por aca ya esta en `main`.
+  - **La promocion NO lo dispara**: `promote.yml` pushea a `main` con `GITHUB_TOKEN`, y un push
+    hecho con ese token no dispara otros workflows. Por eso `promote.yml` tiene que hacer
+    `git push origin main:dev` despues de `git push origin main`. Ese cambio va **directo en
+    `main`**: `promote.yml` vive solo ahi, y agregarlo desde `dev` choca al promover.
 - Cuidado extra en este repo: **`dev` no deploya nada, pero `qa` y `main` sí**, y `start.sh`
   corre `alembic upgrade head` al arrancar. O sea que **pushear a `qa` aplica las migraciones
   pendientes contra la DB Neon de QA** (y pushear a `main`, contra la de producción). No es un

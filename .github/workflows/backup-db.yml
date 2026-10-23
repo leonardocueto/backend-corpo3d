@@ -1,0 +1,75 @@
+name: Backup DB
+
+# Backup diario de la base de PRODUCCION (Neon) a R2. pg_dump en formato custom
+# (comprimido) con el rol de solo lectura backup_reader, subido al bucket
+# corpolab3d-db-backups. La retencion la hacen las lifecycle rules del bucket,
+# no este workflow: daily/ se borra a los 30 dias y monthly/ a los 365.
+# Vive en main (rama default): GitHub solo corre los schedule desde ahi.
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # 06:17 UTC = 03:17 AR (minuto fuera del :00, que GitHub demora)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-db
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      R2_BUCKET: corpolab3d-db-backups
+      # pg_dump tiene que ser de la misma version mayor que el servidor (Neon: 18)
+      # o mas nueva. Si se sube la version en Neon, subir esta tambien.
+      PG_MAJOR: '18'
+    steps:
+      - name: Install pg_dump
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "postgresql-client-${PG_MAJOR}"
+          echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
+
+      - name: Dump
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          FILE="corpolab3d-prod-$(date -u +%Y-%m-%d).dump"
+          pg_dump --version
+          pg_dump --format=custom --compress=9 --dbname="$DATABASE_URL" --file="$FILE"
+          # Verifica que el archivo se puede leer antes de subirlo
+          pg_restore --list "$FILE" > /dev/null
+          ls -lh "$FILE"
+          echo "FILE=$FILE" >> "$GITHUB_ENV"
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ENDPOINT: https://${{ secrets.R2_BACKUP_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          set -euo pipefail
+          aws s3 cp "$FILE" "s3://${R2_BUCKET}/daily/${FILE}" \
+            --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          # Copia mensual: la primera corrida exitosa de cada mes. No se ata al dia 1
+          # para que un fallo ese dia no deje al mes sin copia.
+          MONTH="corpolab3d-prod-$(date -u +%Y-%m)-"
+          if ! aws s3 ls "s3://${R2_BUCKET}/monthly/${MONTH}" --endpoint-url "$R2_ENDPOINT" | grep -q .; then
+            aws s3 cp "$FILE" "s3://${R2_BUCKET}/monthly/${FILE}" \
+              --endpoint-url "$R2_ENDPOINT" --only-show-errors
+            echo "Copia mensual subida"
+          fi
+          echo "Backup subido: daily/${FILE}"
