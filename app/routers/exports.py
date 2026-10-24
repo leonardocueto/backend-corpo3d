@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import posixpath
 import re
 import uuid
@@ -20,6 +21,7 @@ from app.ratelimit import limiter
 from app.routers.tiers import user_is_unlimited
 from app.schemas import ExportAttemptsOut, SetAttemptsIn
 from app.storage import put_export_log
+from app.timing import server_timing
 
 # Limite de exportaciones (Free Tier). Ventana ROLLING de 24h anclada al primer
 # intento: el reset ocurre en window_start + WINDOW (hora del SERVIDOR, nunca la
@@ -201,7 +203,14 @@ def download_export(
     intento) y devuelve el ZIP armado aca. La response ES el artefacto: un
     override de responses en devtools no puede fabricar el ZIP del diseno actual.
     El debit y la entrega son atomicos (commit recien con el ZIP armado).
-    Registra un ExportLog de auditoria y sube el .txt a R2 en background."""
+    Registra un ExportLog de auditoria y sube el .txt a R2 en background.
+
+    Devuelve `Server-Timing` con las etapas del lado del servidor (ver `app/timing.py`):
+    `recv` (recepcion del body + parseo del multipart + auth, todo antes del handler),
+    `read` (lectura, validacion, marca de agua del PNG y debito del intento), `zip`, `db`
+    (log de auditoria + commit) y `total`."""
+    t_handler = time.perf_counter()
+    t0 = getattr(request.state, "t0", t_handler)
     now = datetime.now(timezone.utc)
     unlimited = user_is_unlimited(db, user, now)
 
@@ -223,6 +232,7 @@ def download_export(
     if len(files) == 0 or len(files) > MAX_EXPORT_FILES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Cantidad de archivos invalida")
 
+    t_read = time.perf_counter()
     entries: list[tuple[str, bytes]] = []
     total = 0
     seen: set[str] = set()
@@ -252,10 +262,12 @@ def download_export(
     if not unlimited:
         _consume_attempt(db, user.id, now)
 
+    t_zip = time.perf_counter()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, content in entries:
             zf.writestr(path, content)
+    t_db = time.perf_counter()
 
     # Audit log: ultimo pago aprobado del usuario (best-effort, nullable).
     last_payment = db.scalar(
@@ -287,11 +299,20 @@ def download_export(
     background.add_task(put_export_log, log.r2_key, log_content)
 
     db.commit()
+    body = buf.getvalue()
+    t_end = time.perf_counter()
     return Response(
-        content=buf.getvalue(),
+        content=body,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{_safe_zip_name(project_name)}"'
+            "Content-Disposition": f'attachment; filename="{_safe_zip_name(project_name)}"',
+            "Server-Timing": server_timing({
+                "recv": t_handler - t0,
+                "read": t_zip - t_read,
+                "zip": t_db - t_zip,
+                "db": t_end - t_db,
+                "total": t_end - t0,
+            }),
         },
     )
 

@@ -91,3 +91,21 @@ def test_pago_descarga_premium_sin_limite(client, db_session, make_user, login):
     assert res.status_code == 200
     names = zipfile.ZipFile(io.BytesIO(res.content)).namelist()
     assert sorted(names) == ["acrilico/letra.dxf", "ficha.pdf"]
+
+
+def test_server_timing_desglosa_las_etapas_y_cors_lo_expone(client, make_user, login):
+    """El front lee estos tiempos para separar navegador, red y servidor en `?perf=1`."""
+    login(make_user())
+    res = client.post(
+        "/exports/download",
+        files=[("files", ("acrilico/letra.dxf", b"0\nEOF\n", "application/octet-stream"))],
+        data={"structure_id": "open-inner-wall", "project_name": "Prueba", "hole_count": "0"},
+        headers={"Origin": "http://localhost:3001"},
+    )
+    assert res.status_code == 200
+    stages = dict(part.strip().split(";dur=") for part in res.headers["server-timing"].split(","))
+    assert list(stages) == ["recv", "read", "zip", "db", "total"]
+    assert all(float(v) >= 0 for v in stages.values())
+    assert float(stages["total"]) >= float(stages["zip"])
+    # Sin el expose, el navegador no le deja leer el header al front.
+    assert "server-timing" in res.headers.get("access-control-expose-headers", "").lower()
