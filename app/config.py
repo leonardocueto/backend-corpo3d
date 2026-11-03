@@ -42,7 +42,10 @@ class Settings(BaseSettings):
     # uno solo tiene que pedir la re-aceptacion de ese, no de los dos.
     # 2026-08-14: la baja de cuenta paso a ser self-service (§14.1 decia que habia
     # que escribir a contacto@).
-    terms_version: str = "2026-08-14"
+    # 2026-11-03: el plan gratuito paso de 3 descargas cada 24 horas a 3 cada 7
+    # dias (§5.1). Cambia lo que el usuario recibe sin pagar, asi que se pide la
+    # re-aceptacion de los Terminos.
+    terms_version: str = "2026-11-03"
     # 2026-08-16: se activaron cookies de medicion (Google Analytics via GTM +
     # Microsoft Clarity), declaradas en el §5.3 y aceptadas al usar el servicio /
     # registrarse. NO hay banner de cookies (Argentina no tiene una norma tipo

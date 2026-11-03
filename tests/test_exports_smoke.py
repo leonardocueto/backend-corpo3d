@@ -91,3 +91,37 @@ def test_pago_descarga_premium_sin_limite(client, db_session, make_user, login):
     assert res.status_code == 200
     names = zipfile.ZipFile(io.BytesIO(res.content)).namelist()
     assert sorted(names) == ["acrilico/letra.dxf", "ficha.pdf"]
+
+
+def _shift_window(db_session, user, days):
+    """Corre el inicio de la ventana del usuario `days` dias hacia atras."""
+    from sqlalchemy import select
+
+    from app.models import ExportWindow
+
+    win = db_session.scalar(select(ExportWindow).where(ExportWindow.user_id == user.id))
+    win.window_start -= timedelta(days=days)
+    db_session.commit()
+
+
+def test_free_la_ventana_dura_siete_dias(client, db_session, make_user, login):
+    user = make_user()
+    login(user)
+    for _ in range(3):
+        assert _download(client).status_code == 200
+
+    attempts = client.get("/exports/attempts").json()
+    reset_at = datetime.fromisoformat(attempts["reset_at"])
+    assert attempts["limit"] == 3
+    assert abs(reset_at - (datetime.now(UTC) + timedelta(days=7))) < timedelta(minutes=1)
+
+    # A los 6 dias sigue bloqueado: ya no es una ventana de 24h.
+    _shift_window(db_session, user, days=6)
+    assert client.get("/exports/attempts").json()["remaining"] == 0
+    assert _download(client).status_code == 403
+
+    # Pasados los 7 dias vuelve el cupo completo, y la descarga abre una ventana nueva.
+    _shift_window(db_session, user, days=2)
+    assert client.get("/exports/attempts").json()["remaining"] == 3
+    assert _download(client).status_code == 200
+    assert client.get("/exports/attempts").json()["remaining"] == 2
