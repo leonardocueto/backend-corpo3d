@@ -16,7 +16,7 @@ from app.schemas import MyTierOut, SetTierIn, UserTierOut
 
 # Tiers de usuario. Autoridad dual: suscripcion MP activa (primario) +
 # `expires_at` como safety net (fallback para legacy one-time y webhook que
-# no llega). `free` = limite normal (3 intentos / 24h); `mensual`/`anual`
+# no llega). `free` = limite normal (3 intentos cada 7 dias); `mensual`/`anual`
 # = exportaciones ilimitadas.
 router = APIRouter(prefix="/tiers", tags=["tiers"])
 

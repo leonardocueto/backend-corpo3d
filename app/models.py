@@ -222,11 +222,11 @@ class LoginOtp(Base):
 
 
 class ExportWindow(Base):
-    """Ventana rolling de 24h del limite de exportaciones por usuario (Free Tier).
+    """Ventana rolling de 7 dias del limite de exportaciones por usuario (Free Tier).
 
     Una sola fila por usuario (`user_id` unico): se reutiliza/resetea, no es
     historico. `window_start` ancla la ventana actual; la ventana sigue viva
-    hasta `window_start + 24h` (calculado contra la hora del SERVIDOR, nunca la
+    hasta `window_start + 7 dias` (calculado contra la hora del SERVIDOR, nunca la
     del cliente). Los admin no tienen fila: su limite es ilimitado."""
 
     __tablename__ = "export_windows"
