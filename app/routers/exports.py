@@ -31,13 +31,15 @@ from app.routers.tiers import user_is_unlimited
 from app.schemas import ExportAttemptsOut, SetAttemptsIn
 from app.storage import put_export_log
 
-# Limite de exportaciones (Free Tier). Ventana ROLLING de 24h anclada al primer
+# Limite de exportaciones (Free Tier). Ventana ROLLING de 7 dias anclada al primer
 # intento: el reset ocurre en window_start + WINDOW (hora del SERVIDOR, nunca la
 # del cliente, para que cambiar el reloj local no de intentos extra).
+# Era de 24h hasta el 2026-11-03: se paso a semanal porque 3 por dia alcanzaba
+# para no pagar nunca, sobre todo repartido en varias cuentas de la misma persona.
 router = APIRouter(prefix="/exports", tags=["exports"])
 
-DAILY_LIMIT = 3
-WINDOW = timedelta(hours=24)
+FREE_LIMIT = 3
+WINDOW = timedelta(days=7)
 
 # Estructuras premium (solo los IDs; las definiciones geometricas viven en el
 # front, que las necesita para el preview). El gate real de descarga es este:
@@ -65,15 +67,15 @@ ALLOWED_EXPORT_EXTENSIONS = {".dxf", ".svg", ".stl", ".png", ".pdf"}
 
 def _admin_response() -> ExportAttemptsOut:
     """Los admin no tienen limite."""
-    return ExportAttemptsOut(limit=DAILY_LIMIT, remaining=None, unlimited=True, reset_at=None)
+    return ExportAttemptsOut(limit=FREE_LIMIT, remaining=None, unlimited=True, reset_at=None)
 
 
 def remaining_for(win: "ExportWindow | None", now: datetime) -> int:
     """Intentos efectivos de un usuario NO admin segun su ventana, considerando
-    la expiracion de 24h (una ventana vencida/inexistente se cuenta como llena).
+    la expiracion de la ventana (una ventana vencida/inexistente se cuenta como llena).
     Solo lectura: no crea ni resetea la fila."""
     if win is None or now >= win.window_start + WINDOW:
-        return DAILY_LIMIT
+        return FREE_LIMIT
     return win.remaining_attempts
 
 
@@ -88,7 +90,7 @@ def _get_or_create_locked(db: DbSession, user_id, now: datetime) -> ExportWindow
     if win is not None:
         return win
 
-    win = ExportWindow(user_id=user_id, window_start=now, remaining_attempts=DAILY_LIMIT)
+    win = ExportWindow(user_id=user_id, window_start=now, remaining_attempts=FREE_LIMIT)
     db.add(win)
     try:
         db.flush()
@@ -113,7 +115,7 @@ def get_attempts(
     win = db.scalar(select(ExportWindow).where(ExportWindow.user_id == user.id))
     active = win is not None and now < win.window_start + WINDOW
     return ExportAttemptsOut(
-        limit=DAILY_LIMIT,
+        limit=FREE_LIMIT,
         remaining=remaining_for(win, now),
         unlimited=False,
         reset_at=win.window_start + WINDOW if active else None,
@@ -130,7 +132,7 @@ def _consume_attempt(db: DbSession, user_id, now: datetime) -> ExportWindow:
 
     if now >= win.window_start + WINDOW:
         win.window_start = now
-        win.remaining_attempts = DAILY_LIMIT
+        win.remaining_attempts = FREE_LIMIT
 
     if win.remaining_attempts <= 0:
         raise HTTPException(
@@ -310,7 +312,7 @@ def set_user_attempts(
     user_id: uuid.UUID, payload: SetAttemptsIn, db: DbSession = Depends(get_db)
 ) -> ExportAttemptsOut:
     """Carga manual de intentos a un usuario (admin). FIJA el contador a
-    `amount` y reinicia la ventana de 24h. Solo para usuarios con limite: a uno
+    `amount` y reinicia la ventana de 7 dias. Solo para usuarios con limite: a uno
     ilimitado (admin o tier pago vigente) no tiene sentido y abriria bugs."""
     target = db.get(User, user_id)
     if target is None:
@@ -336,7 +338,7 @@ def set_user_attempts(
     db.commit()
     db.refresh(win)
     return ExportAttemptsOut(
-        limit=DAILY_LIMIT,
+        limit=FREE_LIMIT,
         remaining=win.remaining_attempts,
         unlimited=False,
         reset_at=win.window_start + WINDOW,

@@ -402,6 +402,12 @@ generó el editor (`files[]`, cada uno con su path relativo como `filename`, ej.
   PDF** para cuentas free (la ficha técnica es feature paga); (3b) **watermark del PNG** para
   cuentas free (Pillow: `_watermark_png`, semi-transparente bottom-right, 4% de la altura;
   el front también aplica el suyo — el backend refuerza); (4) free → `_consume_attempt`.
+- **Cupo free: `FREE_LIMIT = 3` cada `WINDOW = 7 días`** (ventana rolling anclada a la
+  primera exportación, hora del servidor). Era de 24 h hasta el **2026-11-03**: se pasó a
+  semanal porque 3 por día alcanzaba para no pagar nunca, sobre todo repartido en varias
+  cuentas. Sin migración (`export_windows` ya guarda `window_start`); quien estaba a mitad
+  de su período al desplegar lo tuvo estirado a 7 días. El número aparece también en
+  Términos §5.1, así que **cambiarlo obliga a subir `TERMS_VERSION`**.
 - **`_consume_attempt(db, user_id, now)`**: descuenta bajo `SELECT ... FOR UPDATE` **sin
   commitear** — el commit ocurre recién con el ZIP ya armado, así el debit y la entrega son
   **atómicos** (si el armado falla, el rollback devuelve el intento).

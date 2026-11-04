@@ -220,7 +220,7 @@ class ExportAttemptsOut(BaseModel):
     """Estado del limite de exportaciones del usuario para la ventana actual.
 
     `remaining` es null y `unlimited` True para admin (sin limite). `reset_at`
-    es la hora (del servidor) en que la ventana de 24h vuelve a tener los 3."""
+    es la hora (del servidor) en que la ventana de 7 dias vuelve a tener los 3."""
 
     limit: int
     remaining: int | None
@@ -230,7 +230,7 @@ class ExportAttemptsOut(BaseModel):
 
 class SetAttemptsIn(BaseModel):
     """Carga manual de intentos a un usuario (panel admin). FIJA el contador a
-    `amount` y abre una ventana fresca de 24h."""
+    `amount` y abre una ventana fresca de 7 dias."""
 
     amount: int = Field(ge=0, le=999)
 
