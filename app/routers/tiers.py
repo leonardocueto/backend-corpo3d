@@ -86,37 +86,66 @@ def plan_copy(plan: str | None) -> PlanCopy:
     return _PLAN_COPY.get(plan or "", _PLAN_COPY["anual"])
 
 
-def tier_is_unlimited(tier: "UserTier | None", now: datetime) -> bool:
+def tier_is_unlimited(
+    tier: "UserTier | None", now: datetime, *, cancelled: bool = False
+) -> bool:
     """True si el tier es pago y NO esta vencido. Funcion pura (sirve para el
     batch del listado admin).
 
     El corte es `expires_at + TIER_GRACE`, no `expires_at` pelado: el colchon vive
-    aca y no en la columna (ver TIER_GRACE)."""
+    aca y no en la columna (ver TIER_GRACE).
+
+    Con `cancelled=True` (la suscripcion vinculada al tier esta `cancelled` en MP)
+    el corte es `expires_at` exacto, SIN colchon: TIER_GRACE existe para esperar el
+    webhook de una renovacion, y una suscripcion cancelada no va a renovar nunca.
+    Con el colchon, cancelar regalaba 3 dias de acceso pago. Una `paused` mantiene
+    el colchon a proposito: puede reanudarse y cobrar."""
+    grace = timedelta(0) if cancelled else TIER_GRACE
     return (
         tier is not None
         and tier.tier in PAID_TIERS
         and tier.expires_at is not None
-        and tier.expires_at + TIER_GRACE > now
+        and tier.expires_at + grace > now
     )
 
 
-def downgrade_if_expired(tier: "UserTier | None", now: datetime) -> bool:
+def downgrade_if_expired(
+    tier: "UserTier | None", now: datetime, *, cancelled: bool = False
+) -> bool:
     """Si el tier es pago y vencio, lo pasa FISICAMENTE a 'free' (mantiene
     paid_at/expires_at como historial del ultimo pago). Devuelve True si cambio
-    algo (para que el caller commitee). Idempotente: ya en 'free' no toca nada."""
-    if tier is not None and tier.tier in PAID_TIERS and not tier_is_unlimited(tier, now):
+    algo (para que el caller commitee). Idempotente: ya en 'free' no toca nada.
+
+    `cancelled`: ver `tier_is_unlimited`."""
+    if (
+        tier is not None
+        and tier.tier in PAID_TIERS
+        and not tier_is_unlimited(tier, now, cancelled=cancelled)
+    ):
         tier.tier = "free"
         return True
     return False
+
+
+def subscription_cancelled(sub: "Subscription | None") -> bool:
+    """True si la suscripcion vinculada al tier ya no va a renovar (ver
+    `tier_is_unlimited`)."""
+    return sub is not None and sub.mp_status == "cancelled"
 
 
 def sync_user_tier(db: DbSession, user: User, now: datetime) -> "UserTier | None":
     """Reconcilia el tier del usuario: si su tier pago vencio, lo degrada a 'free'
     y persiste. Reusable (login + user_is_unlimited). No-op si no hay fila."""
     tier = db.scalar(select(UserTier).where(UserTier.user_id == user.id))
-    if downgrade_if_expired(tier, now):
+    if downgrade_if_expired(tier, now, cancelled=_tier_sub_cancelled(db, tier)):
         db.commit()
     return tier
+
+
+def _tier_sub_cancelled(db: DbSession, tier: "UserTier | None") -> bool:
+    if tier is None or tier.subscription_id is None:
+        return False
+    return subscription_cancelled(db.get(Subscription, tier.subscription_id))
 
 
 def user_is_unlimited(db: DbSession, user: User, now: datetime) -> bool:
@@ -136,7 +165,7 @@ def user_is_unlimited(db: DbSession, user: User, now: datetime) -> bool:
         sub = db.get(Subscription, tier.subscription_id)
         if sub and sub.mp_status == "authorized":
             return True
-    return tier_is_unlimited(tier, now)
+    return tier_is_unlimited(tier, now, cancelled=_tier_sub_cancelled(db, tier))
 
 
 def _within_dunning(tier: UserTier, now: datetime) -> bool:
