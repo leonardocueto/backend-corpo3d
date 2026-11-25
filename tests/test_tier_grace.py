@@ -69,3 +69,32 @@ def test_grace_kept_without_cancelled_subscription(db_session, make_user, mp_sta
     assert user_is_unlimited(db_session, user, NOW) is True
     db_session.refresh(tier)
     assert tier.tier == "mensual"
+
+
+def test_admin_listing_matches_grace_rule(client, db_session, make_user):
+    """El panel admin dice lo mismo que el resto: cancelada vencida ayer = free,
+    pausada vencida ayer = sigue paga por la gracia."""
+    from app.deps import require_admin
+    from app.main import app
+
+    now = datetime.now(UTC)
+    cancelled_user = make_user()
+    paused_user = make_user()
+    admin = make_user(is_admin=True)
+    for user, status in ((cancelled_user, "cancelled"), (paused_user, "paused")):
+        tier = _setup(db_session, user, status)
+        tier.expires_at = now - timedelta(days=1)
+    db_session.commit()
+
+    app.dependency_overrides[require_admin] = lambda: admin
+    try:
+        res = client.get("/users", params={"page_size": 100})
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+    assert res.status_code == 200, res.text
+    items = {i["email"]: i for i in res.json()["items"]}
+
+    assert items[cancelled_user.email]["tier"] == "free"
+    assert items[cancelled_user.email]["export_unlimited"] is False
+    assert items[paused_user.email]["tier"] == "mensual"
+    assert items[paused_user.email]["export_unlimited"] is True
