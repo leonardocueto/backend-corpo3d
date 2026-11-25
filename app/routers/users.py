@@ -16,9 +16,15 @@ from sqlalchemy.orm import Session as DbSession
 from app.database import get_db
 from app.deps import require_admin
 from app import storage
-from app.models import ExportWindow, User, UserDesign, UserTier
+from app.models import ExportWindow, Subscription, User, UserDesign, UserTier
 from app.routers.exports import remaining_for
-from app.routers.tiers import PAID_TIERS, downgrade_if_expired, expiry_for, tier_is_unlimited
+from app.routers.tiers import (
+    PAID_TIERS,
+    downgrade_if_expired,
+    expiry_for,
+    subscription_cancelled,
+    tier_is_unlimited,
+)
 from app.schemas import (
     AdminUserOut,
     PasswordUpdate,
@@ -129,16 +135,29 @@ def list_users(
     )
     win_by_user = {w.user_id: w for w in windows}
     tier_by_user = {t.user_id: t for t in tiers}
+    # Suscripciones linkeadas a esos tiers, tambien en una sola query: con la
+    # suscripcion cancelada el tier vence sin los dias de gracia (ver
+    # `tier_is_unlimited`), y el listado tiene que decir lo mismo que el resto.
+    sub_ids = [t.subscription_id for t in tiers if t.subscription_id is not None]
+    subs = (
+        db.scalars(select(Subscription).where(Subscription.id.in_(sub_ids))).all()
+        if sub_ids
+        else []
+    )
+    sub_by_id = {s.id: s for s in subs}
+
+    def cancelled(t: UserTier | None) -> bool:
+        return t is not None and subscription_cancelled(sub_by_id.get(t.subscription_id))
 
     # Sincroniza (degrada a free) los tiers vencidos de la pagina; un solo commit.
     # Lista (no generador) para evaluar TODOS, no cortar en el primer vencido.
-    if any([downgrade_if_expired(t, now) for t in tiers]):
+    if any([downgrade_if_expired(t, now, cancelled=cancelled(t)) for t in tiers]):
         db.commit()
 
     def to_item(u: User) -> AdminUserOut:
         base = UserOut.model_validate(u).model_dump()
         tier_obj = tier_by_user.get(u.id)
-        unlimited = u.is_admin or tier_is_unlimited(tier_obj, now)
+        unlimited = u.is_admin or tier_is_unlimited(tier_obj, now, cancelled=cancelled(tier_obj))
         return AdminUserOut(
             **base,
             # tier crudo = unica fuente de verdad (ya es 'free' si vencio).
